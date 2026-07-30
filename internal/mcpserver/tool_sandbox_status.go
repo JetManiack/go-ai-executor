@@ -14,9 +14,9 @@ type SandboxStatusOutput struct {
 	Status sandbox.SandboxStatus `json:"status" jsonschema:"the calling agent's sandbox configuration and limits"`
 }
 
-func sandboxStatusHandler(mgr *sandbox.Manager) mcp.ToolHandlerFor[SandboxStatusInput, SandboxStatusOutput] {
+func sandboxStatusHandler(deps Deps) mcp.ToolHandlerFor[SandboxStatusInput, SandboxStatusOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in SandboxStatusInput) (*mcp.CallToolResult, SandboxStatusOutput, error) {
-		sb, err := sandboxForActor(ctx, mgr)
+		sb, err := sandboxForActor(ctx, deps)
 		if err != nil {
 			return nil, SandboxStatusOutput{}, err
 		}

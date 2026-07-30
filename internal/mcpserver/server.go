@@ -32,21 +32,6 @@ type Deps struct {
 	Version string
 }
 
-// sandboxForActor resolves the sandbox belonging to the authenticated agent.
-//
-// It fails closed. An earlier version defaulted to the shared root sandbox
-// when no actor was in context — unreachable through /mcp, which is wrapped in
-// RequireAgentToken, but it would silently hand the root directory (every
-// agent's sandbox at once) to any future entry point that forgot to
-// authenticate.
-func sandboxForActor(ctx context.Context, mgr *sandbox.Manager) (*sandbox.Sandbox, error) {
-	actor, ok := ActorFromContext(ctx)
-	if !ok {
-		return nil, ErrNoActor
-	}
-	return mgr.GetSandbox(actor.ID)
-}
-
 // RegisterTools adds every MCP tool this server exposes to server.
 func RegisterTools(server *mcp.Server, deps Deps) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -57,27 +42,27 @@ func RegisterTools(server *mcp.Server, deps Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "read_file",
 		Description: "Read file contents relative to the sandbox directory",
-	}, readFileHandler(deps.Manager))
+	}, readFileHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "write_file",
 		Description: "Write text content to a file relative to the sandbox directory",
-	}, writeFileHandler(deps.Manager))
+	}, writeFileHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_dir",
 		Description: "List files and subdirectories inside the sandbox directory",
-	}, listDirHandler(deps.Manager))
+	}, listDirHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delete_file",
 		Description: "Delete a file or directory inside the sandbox directory",
-	}, deleteFileHandler(deps.Manager))
+	}, deleteFileHandler(deps))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_sandbox_status",
 		Description: "Get configuration status and root path of the sandbox environment",
-	}, sandboxStatusHandler(deps.Manager))
+	}, sandboxStatusHandler(deps))
 }
 
 // NewServer builds the MCP server with every tool registered.

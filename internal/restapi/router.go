@@ -1,8 +1,6 @@
 package restapi
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -10,138 +8,50 @@ import (
 
 	"github.com/JetManiack/go-ai-executor/internal/humanauth"
 	"github.com/JetManiack/go-ai-executor/internal/sandbox"
-	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
-type RouterOptions struct {
+// Options is what the REST API needs: the database, the sandbox manager whose
+// terminals it streams and whose processes it kills, and the provider that
+// authenticates the humans doing it.
+type Options struct {
 	DB           *gorm.DB
 	Manager      *sandbox.Manager
 	AuthProvider humanauth.Provider
 }
 
-func NewRouter(opts RouterOptions) http.Handler {
+// NewRouter builds the API handler, mounted with no path prefix (the caller
+// mounts it under /api — see cmd/executor/main.go).
+//
+// Every route requires a human session. Reading — the sandbox list and the
+// terminal stream — is open to any authenticated human; everything that changes
+// state, meaning the emergency block and agent credentials, additionally
+// requires role admin.
+func NewRouter(opts Options) http.Handler {
 	r := chi.NewRouter()
+	r.Use(humanauth.RequireHumanAuth(opts.DB, opts.AuthProvider))
 
-	// Require human session for all REST API endpoints
-	r.Use(func(next http.Handler) http.Handler {
-		return humanauth.RequireHumanSession(opts.AuthProvider, next)
-	})
+	r.Get("/me", meHandler())
 
-	// /api/me
-	r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
-		identity, ok := humanauth.HumanIdentityFromContext(r.Context())
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		writeJSON(w, http.StatusOK, identity)
-	})
+	r.Route("/sandboxes", func(r chi.Router) {
+		r.Get("/", listSandboxesHandler(opts))
+		r.Get("/{id}", getSandboxHandler(opts))
+		r.Get("/{id}/stream", streamSandboxHandler(opts))
 
-	// /api/agents
-	r.Get("/agents", func(w http.ResponseWriter, r *http.Request) {
-		agents, err := storage.ListAgents(opts.DB)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		type AgentWithCreds struct {
-			storage.Actor
-			Credentials []storage.AgentCredential `json:"credentials"`
-		}
-
-		var result []AgentWithCreds
-		for _, agent := range agents {
-			creds, _ := storage.ListAgentCredentials(opts.DB, agent.ID)
-			result = append(result, AgentWithCreds{
-				Actor:       agent,
-				Credentials: creds,
-			})
-		}
-
-		writeJSON(w, http.StatusOK, result)
-	})
-
-	r.Post("/agents", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			DisplayName string `json:"display_name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DisplayName == "" {
-			writeError(w, http.StatusBadRequest, "display_name is required")
-			return
-		}
-
-		agent, err := storage.CreateAgent(opts.DB, req.DisplayName)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		writeJSON(w, http.StatusCreated, agent)
-	})
-
-	r.Post("/agents/{id}/tokens", func(w http.ResponseWriter, r *http.Request) {
-		agentID := chi.URLParam(r, "id")
-		rawToken, cred, err := storage.IssueAgentToken(opts.DB, agentID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"raw_token":  rawToken,
-			"credential": cred,
+		r.Group(func(r chi.Router) {
+			r.Use(humanauth.RequireAdmin)
+			r.Post("/{id}/block", blockSandboxHandler(opts))
+			r.Delete("/{id}/block", releaseSandboxHandler(opts))
 		})
 	})
 
-	r.Delete("/agents/{id}/tokens/{credId}", func(w http.ResponseWriter, r *http.Request) {
-		credID := chi.URLParam(r, "credId")
-		if err := storage.RevokeAgentToken(opts.DB, credID); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
-	})
-
-	// Server-Sent Events (SSE) Live Terminal Output Stream
-	r.Get("/agents/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
-		agentID := chi.URLParam(r, "id")
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		broadcaster := opts.Manager.Broadcaster()
-		ch, unsubscribe := broadcaster.Subscribe(agentID)
-		defer unsubscribe()
-
-		// Send initial keep-alive comment
-		fmt.Fprintf(w, ": connected to agent %s terminal stream\n\n", agentID)
-		flusher.Flush()
-
-		ctx := r.Context()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-ch:
-				if !ok {
-					return
-				}
-				data, err := json.Marshal(event)
-				if err == nil {
-					fmt.Fprintf(w, "data: %s\n\n", data)
-					flusher.Flush()
-				}
-			}
-		}
+	r.Route("/agents", func(r chi.Router) {
+		r.Use(humanauth.RequireAdmin)
+		r.Get("/", listAgentsHandler(opts.DB))
+		r.Post("/", createAgentHandler(opts.DB))
+		r.Delete("/{id}", deleteAgentHandler(opts.DB))
+		r.Get("/{id}/tokens", listAgentTokensHandler(opts.DB))
+		r.Post("/{id}/tokens", issueTokenHandler(opts.DB))
+		r.Delete("/{id}/tokens/{tokenID}", revokeTokenHandler(opts.DB))
 	})
 
 	return r

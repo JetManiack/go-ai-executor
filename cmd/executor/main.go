@@ -138,12 +138,9 @@ func buildAppHandler(cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.
 		// ⚠️ StubProvider authenticates every request as a fixed always-admin
 		// identity with no credential check at all. Only reachable via
 		// --auth-stub, which must never be set outside local development: this
-		// UI streams the live terminal of every sandbox and can stop them.
-		stub, err := humanauth.NewStubProvider(db)
-		if err != nil {
-			return nil, health.ReadyChecker{}, fmt.Errorf("initialize stub auth: %w", err)
-		}
-		authProvider = stub
+		// UI streams the live terminal of every sandbox and can kill the
+		// processes running in them.
+		authProvider = humanauth.StubProvider{}
 		slog.Warn("human auth running in STUB mode — do not deploy to production")
 	} else {
 		return nil, health.ReadyChecker{}, errors.New("real OIDC auth is not wired up yet; pass --auth-stub for local development")
@@ -166,7 +163,7 @@ func buildAppHandler(cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpserver.NewHTTPHandler(mcpserver.Deps{DB: db, Manager: mgr, Version: version}))
-	mux.Handle("/api/", http.StripPrefix("/api", restapi.NewRouter(restapi.RouterOptions{
+	mux.Handle("/api/", http.StripPrefix("/api", restapi.NewRouter(restapi.Options{
 		DB:           db,
 		Manager:      mgr,
 		AuthProvider: authProvider,

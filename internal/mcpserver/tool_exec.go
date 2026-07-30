@@ -5,10 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 )
 
 type ExecCommandInput struct {
@@ -31,11 +28,7 @@ func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecComm
 			return nil, ExecCommandOutput{}, errors.New("command cannot be empty")
 		}
 
-		actor, ok := ActorFromContext(ctx)
-		if !ok {
-			return nil, ExecCommandOutput{}, ErrNoActor
-		}
-		sb, err := deps.Manager.GetSandbox(actor.ID)
+		sb, err := sandboxForActor(ctx, deps)
 		if err != nil {
 			return nil, ExecCommandOutput{}, err
 		}
@@ -45,6 +38,10 @@ func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecComm
 			timeout = time.Duration(in.TimeoutSec) * time.Second
 		}
 
+		// The sandbox publishes started/output/finished events to watchers as
+		// the command runs; nothing is broadcast from here, so a human sees a
+		// long-running command's output while it is still producing it rather
+		// than in one dump at the end.
 		res, execErr := sb.ExecCommand(ctx, in.Command, timeout, in.WorkDir)
 		output := ExecCommandOutput{
 			Stdout:     res.Stdout,
@@ -54,25 +51,10 @@ func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecComm
 			Truncated:  res.Truncated,
 		}
 
-		now := time.Now().UTC()
-		execID := uuid.NewString()
-
-		deps.Manager.Broadcaster().Publish(sandbox.ExecEvent{
-			ID:         execID,
-			AgentID:    actor.ID,
-			Command:    in.Command,
-			WorkDir:    in.WorkDir,
-			Stdout:     res.Stdout,
-			Stderr:     res.Stderr,
-			ExitCode:   res.ExitCode,
-			DurationMs: res.DurationMs,
-			Truncated:  res.Truncated,
-			Timestamp:  now,
-		})
-
 		// A command that exits non-zero is a successful tool call reporting a
-		// failed command, so only a genuine execution failure (timeout, missing
-		// shell) becomes a tool error. The output is returned either way.
+		// failed command, so only a genuine execution failure (a timeout, a
+		// missing shell) becomes a tool error. The output is returned either
+		// way.
 		if execErr != nil {
 			return nil, output, execErr
 		}

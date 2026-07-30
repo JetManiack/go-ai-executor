@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 )
 
 type WriteFileInput struct {
@@ -20,12 +18,12 @@ type WriteFileOutput struct {
 	Bytes int    `json:"bytes" jsonschema:"number of bytes written"`
 }
 
-func writeFileHandler(mgr *sandbox.Manager) mcp.ToolHandlerFor[WriteFileInput, WriteFileOutput] {
+func writeFileHandler(deps Deps) mcp.ToolHandlerFor[WriteFileInput, WriteFileOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in WriteFileInput) (*mcp.CallToolResult, WriteFileOutput, error) {
 		if in.Path == "" {
 			return nil, WriteFileOutput{}, errors.New("path cannot be empty")
 		}
-		sb, err := sandboxForActor(ctx, mgr)
+		sb, err := sandboxForActor(ctx, deps)
 		if err != nil {
 			return nil, WriteFileOutput{}, err
 		}

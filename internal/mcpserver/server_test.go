@@ -106,23 +106,23 @@ func TestToolsFailClosedWithoutActor(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("read_file", func(t *testing.T) {
-		_, _, err := readFileHandler(deps.Manager)(ctx, nil, ReadFileInput{Path: "x"})
+		_, _, err := readFileHandler(deps)(ctx, nil, ReadFileInput{Path: "x"})
 		requireErrNoActor(t, err)
 	})
 	t.Run("write_file", func(t *testing.T) {
-		_, _, err := writeFileHandler(deps.Manager)(ctx, nil, WriteFileInput{Path: "x", Content: "y"})
+		_, _, err := writeFileHandler(deps)(ctx, nil, WriteFileInput{Path: "x", Content: "y"})
 		requireErrNoActor(t, err)
 	})
 	t.Run("list_dir", func(t *testing.T) {
-		_, _, err := listDirHandler(deps.Manager)(ctx, nil, ListDirInput{})
+		_, _, err := listDirHandler(deps)(ctx, nil, ListDirInput{})
 		requireErrNoActor(t, err)
 	})
 	t.Run("delete_file", func(t *testing.T) {
-		_, _, err := deleteFileHandler(deps.Manager)(ctx, nil, DeleteFileInput{Path: "x"})
+		_, _, err := deleteFileHandler(deps)(ctx, nil, DeleteFileInput{Path: "x"})
 		requireErrNoActor(t, err)
 	})
 	t.Run("get_sandbox_status", func(t *testing.T) {
-		_, _, err := sandboxStatusHandler(deps.Manager)(ctx, nil, SandboxStatusInput{})
+		_, _, err := sandboxStatusHandler(deps)(ctx, nil, SandboxStatusInput{})
 		requireErrNoActor(t, err)
 	})
 	t.Run("exec_command", func(t *testing.T) {

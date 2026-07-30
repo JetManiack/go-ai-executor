@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 )
 
 type ReadFileInput struct {
@@ -19,12 +17,12 @@ type ReadFileOutput struct {
 	Content string `json:"content" jsonschema:"the file's contents"`
 }
 
-func readFileHandler(mgr *sandbox.Manager) mcp.ToolHandlerFor[ReadFileInput, ReadFileOutput] {
+func readFileHandler(deps Deps) mcp.ToolHandlerFor[ReadFileInput, ReadFileOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in ReadFileInput) (*mcp.CallToolResult, ReadFileOutput, error) {
 		if in.Path == "" {
 			return nil, ReadFileOutput{}, errors.New("path cannot be empty")
 		}
-		sb, err := sandboxForActor(ctx, mgr)
+		sb, err := sandboxForActor(ctx, deps)
 		if err != nil {
 			return nil, ReadFileOutput{}, err
 		}

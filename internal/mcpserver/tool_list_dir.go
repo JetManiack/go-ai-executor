@@ -18,13 +18,13 @@ type ListDirOutput struct {
 	Files []sandbox.FileInfo `json:"files" jsonschema:"entries in the directory, non-recursive"`
 }
 
-func listDirHandler(mgr *sandbox.Manager) mcp.ToolHandlerFor[ListDirInput, ListDirOutput] {
+func listDirHandler(deps Deps) mcp.ToolHandlerFor[ListDirInput, ListDirOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in ListDirInput) (*mcp.CallToolResult, ListDirOutput, error) {
 		path := in.Path
 		if path == "" {
 			path = "."
 		}
-		sb, err := sandboxForActor(ctx, mgr)
+		sb, err := sandboxForActor(ctx, deps)
 		if err != nil {
 			return nil, ListDirOutput{}, err
 		}
