@@ -1,25 +1,29 @@
-export function TopNav({ activeTab, onSelectTab, currentUser }) {
+export default function TopNav({ active, role, displayName }) {
+  function handleLogout() {
+    fetch("/auth/logout", { method: "POST" }).then(() => {
+      window.location.href = "/";
+    });
+  }
+
   return (
-    <header className="top-nav">
-      <div className="nav-brand">
-        <span className="brand-logo">⚡</span>
-        <span className="brand-title">AI Executor</span>
-      </div>
-      <nav className="nav-links">
-        <button
-          className={`nav-btn ${activeTab === 'agents' ? 'active' : ''}`}
-          onClick={() => onSelectTab('agents')}
-        >
-          🤖 Agents & Sandboxes
-        </button>
-      </nav>
-      <div className="nav-user">
-        {currentUser && (
-          <span className="user-badge">
-            👤 {currentUser.actor?.display_name || 'Admin'} ({currentUser.identity?.role || 'admin'})
-          </span>
-        )}
-      </div>
-    </header>
+    <nav className="nav-tabs">
+      <a href="#/sandboxes" className={active === "sandboxes" ? "active" : ""}>
+        Sandboxes
+      </a>
+      {/* Hidden for a viewer because every request the screen makes would be
+          refused; App also redirects a hand-typed #/agents. */}
+      {role === "admin" && (
+        <a href="#/agents" className={active === "agents" ? "active" : ""}>
+          Agents
+        </a>
+      )}
+      <span className="spacer" />
+      <span className="whoami">
+        {displayName} · {role}
+      </span>
+      <button type="button" className="logout-link" onClick={handleLogout}>
+        Log out
+      </button>
+    </nav>
   );
 }

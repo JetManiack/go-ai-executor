@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -81,6 +82,43 @@ func newRootCommand() *cli.Command {
 				Usage:   "use a fixed, always-admin test identity instead of real Keycloak/OIDC auth — local development only, never set this in a real deployment",
 				Sources: cli.EnvVars("AUTH_STUB"),
 			},
+			&cli.StringFlag{
+				Name:    "oidc-issuer",
+				Usage:   "Keycloak realm issuer URL, e.g. https://keycloak.internal/realms/executor",
+				Sources: cli.EnvVars("OIDC_ISSUER"),
+			},
+			&cli.StringFlag{
+				Name:    "oidc-client-id",
+				Usage:   "client ID of the dedicated OIDC client configured in Keycloak for this app",
+				Sources: cli.EnvVars("OIDC_CLIENT_ID"),
+			},
+			&cli.StringFlag{
+				Name:    "oidc-client-secret",
+				Usage:   "client secret of the dedicated OIDC client configured in Keycloak for this app",
+				Sources: cli.EnvVars("OIDC_CLIENT_SECRET"),
+			},
+			&cli.StringFlag{
+				Name:    "public-url",
+				Usage:   "this server's externally-reachable base URL (used to build the OIDC redirect URI <public-url>/auth/callback — must match what's configured on the Keycloak client)",
+				Sources: cli.EnvVars("PUBLIC_URL"),
+			},
+			&cli.StringFlag{
+				Name:    "admin-group",
+				Value:   "admins",
+				Usage:   "Keycloak group (from the ID token's groups claim) whose members may block sandboxes and manage agent tokens; everyone else gets read-only access",
+				Sources: cli.EnvVars("ADMIN_GROUP"),
+			},
+			&cli.StringFlag{
+				Name:    "session-encryption-key",
+				Usage:   "base64-encoded 32-byte key used to encrypt session refresh tokens at rest (generate one with: openssl rand -base64 32)",
+				Sources: cli.EnvVars("SESSION_ENCRYPTION_KEY"),
+			},
+			&cli.IntFlag{
+				Name:    "stream-buffer-bytes",
+				Value:   sandbox.DefaultStreamBufferBytes,
+				Usage:   "how much recent terminal output is retained per sandbox for replay to a connecting watcher",
+				Sources: cli.EnvVars("STREAM_BUFFER_BYTES"),
+			},
 			&cli.BoolFlag{
 				Name:    "devel",
 				Usage:   "serve static assets from disk instead of the embedded snapshot",
@@ -89,11 +127,12 @@ func newRootCommand() *cli.Command {
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			mgr, err := sandbox.NewManager(sandbox.Config{
-				RootDir:        cmd.String("sandbox-dir"),
-				DefaultTimeout: cmd.Duration("default-timeout"),
-				MaxOutputBytes: cmd.Int("max-output-bytes"),
-				Shell:          cmd.String("shell"),
-				AllowedEnvs:    sandbox.DefaultConfig("").AllowedEnvs,
+				RootDir:           cmd.String("sandbox-dir"),
+				DefaultTimeout:    cmd.Duration("default-timeout"),
+				MaxOutputBytes:    cmd.Int("max-output-bytes"),
+				Shell:             cmd.String("shell"),
+				StreamBufferBytes: cmd.Int("stream-buffer-bytes"),
+				AllowedEnvs:       sandbox.DefaultConfig("").AllowedEnvs,
 			})
 			if err != nil {
 				return fmt.Errorf("initialize sandbox manager: %w", err)
@@ -132,9 +171,36 @@ func newRootCommand() *cli.Command {
 // reflects db actually being usable. It's shared between the immediate-ready
 // startup path (serveReady) and the recovers-after-retry path
 // (serveDegradedUntilReady), so both build identical routes.
-func buildAppHandler(cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.Handler, health.ReadyChecker, error) {
+func buildAppHandler(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.Handler, health.ReadyChecker, error) {
 	var authProvider humanauth.Provider
-	if cmd.Bool("auth-stub") {
+	var oidcHandlers humanauth.OIDCHandlers
+	useOIDC := !cmd.Bool("auth-stub")
+
+	if useOIDC {
+		if cmd.String("oidc-issuer") == "" || cmd.String("oidc-client-id") == "" || cmd.String("oidc-client-secret") == "" || cmd.String("public-url") == "" || cmd.String("session-encryption-key") == "" {
+			return nil, health.ReadyChecker{}, errors.New("OIDC auth requires --oidc-issuer, --oidc-client-id, --oidc-client-secret, --public-url, and --session-encryption-key (or pass --auth-stub for local development)")
+		}
+		encryptionKey, err := base64.StdEncoding.DecodeString(cmd.String("session-encryption-key"))
+		if err != nil {
+			return nil, health.ReadyChecker{}, fmt.Errorf("--session-encryption-key must be valid base64: %w", err)
+		}
+		if len(encryptionKey) != 32 {
+			return nil, health.ReadyChecker{}, fmt.Errorf("--session-encryption-key must decode to exactly 32 bytes, got %d (generate one with: openssl rand -base64 32)", len(encryptionKey))
+		}
+		provider, handlers, err := humanauth.NewOIDCHandlers(ctx, db, humanauth.OIDCConfig{
+			Issuer:        cmd.String("oidc-issuer"),
+			ClientID:      cmd.String("oidc-client-id"),
+			ClientSecret:  cmd.String("oidc-client-secret"),
+			PublicURL:     cmd.String("public-url"),
+			AdminGroup:    cmd.String("admin-group"),
+			EncryptionKey: encryptionKey,
+		})
+		if err != nil {
+			return nil, health.ReadyChecker{}, fmt.Errorf("configure OIDC: %w", err)
+		}
+		authProvider = provider
+		oidcHandlers = handlers
+	} else {
 		// ⚠️ StubProvider authenticates every request as a fixed always-admin
 		// identity with no credential check at all. Only reachable via
 		// --auth-stub, which must never be set outside local development: this
@@ -142,8 +208,6 @@ func buildAppHandler(cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.
 		// processes running in them.
 		authProvider = humanauth.StubProvider{}
 		slog.Warn("human auth running in STUB mode — do not deploy to production")
-	} else {
-		return nil, health.ReadyChecker{}, errors.New("real OIDC auth is not wired up yet; pass --auth-stub for local development")
 	}
 
 	frontendFS, err := frontend.FS(cmd.Bool("devel"))
@@ -168,6 +232,11 @@ func buildAppHandler(cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.
 		Manager:      mgr,
 		AuthProvider: authProvider,
 	})))
+	if useOIDC {
+		mux.HandleFunc("/auth/login", oidcHandlers.Login)
+		mux.HandleFunc("/auth/callback", oidcHandlers.Callback)
+		mux.HandleFunc("/auth/logout", oidcHandlers.Logout)
+	}
 	mux.Handle("/", http.FileServer(frontendFS))
 
 	return mux, readyChecker, nil
@@ -192,7 +261,7 @@ func newServer(addr string, handler http.Handler) *http.Server {
 // builds immediately and the server serves fully-ready from the first accepted
 // connection.
 func serveReady(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) error {
-	appHandler, readyChecker, err := buildAppHandler(cmd, mgr, db)
+	appHandler, readyChecker, err := buildAppHandler(ctx, cmd, mgr, db)
 	if err != nil {
 		return err
 	}
@@ -272,7 +341,7 @@ func serveDegradedUntilReady(ctx context.Context, cmd *cli.Command, mgr *sandbox
 			}
 			return err
 		case db := <-dbReady:
-			handler, readyChecker, err := buildAppHandler(cmd, mgr, db)
+			handler, readyChecker, err := buildAppHandler(ctx, cmd, mgr, db)
 			if err != nil {
 				if shutdownErr := shutdown(server); shutdownErr != nil {
 					slog.Error("shutdown after failed route build", "error", shutdownErr)

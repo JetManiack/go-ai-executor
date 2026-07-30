@@ -1,43 +1,49 @@
-import { TopNav } from './TopNav.jsx';
-import { Agents } from './Agents.jsx';
-import { LiveTerminal } from './LiveTerminal.jsx';
+import { useHashRoute } from "./router.js";
+import { useCurrentUser } from "./currentUser.js";
+import TopNav from "./TopNav.jsx";
+import SandboxList from "./SandboxList.jsx";
+import Terminal from "./Terminal.jsx";
+import Agents from "./Agents.jsx";
 
-const { useState, useEffect } = React;
+export default function App() {
+  const route = useHashRoute();
+  const { user, error } = useCurrentUser();
 
-export function App() {
-  const [activeTab, setActiveTab] = useState('agents');
-  const [selectedAgent, setSelectedAgent] = useState(null);
-  const [currentUser, setCurrentUser] = useState(null);
+  if (error) {
+    return (
+      <div className="login-gate">
+        <p>You need to log in to watch sandbox terminals.</p>
+        <a href="/auth/login">Log in</a>
+      </div>
+    );
+  }
 
-  useEffect(() => {
-    fetch('/api/me')
-      .then((res) => res.json())
-      .then((data) => setCurrentUser(data))
-      .catch((err) => console.error('Failed to fetch user:', err));
-  }, []);
+  if (!user) {
+    return <div className="empty-state">Loading…</div>;
+  }
+
+  const terminalMatch = route.path.match(/^\/sandboxes\/(.+)$/);
+  const active = route.path === "/agents" ? "agents" : "sandboxes";
+
+  let screen;
+  if (route.path === "/agents") {
+    // A viewer cannot manage agents and isn't offered the tab; a hand-typed
+    // #/agents falls back to the sandbox list rather than rendering a screen
+    // whose every request would 403.
+    screen = user.role === "admin" ? <Agents /> : <SandboxList />;
+  } else if (terminalMatch) {
+    screen = <Terminal sandboxId={terminalMatch[1]} role={user.role} />;
+  } else {
+    screen = <SandboxList />;
+  }
 
   return (
-    <div className="app-container">
-      <TopNav
-        activeTab={activeTab}
-        onSelectTab={(tab) => {
-          setActiveTab(tab);
-          setSelectedAgent(null);
-        }}
-        currentUser={currentUser}
-      />
-      <main className="content-area">
-        {selectedAgent ? (
-          <LiveTerminal
-            agent={selectedAgent}
-            onBack={() => setSelectedAgent(null)}
-          />
-        ) : (
-          <Agents
-            onOpenTerminal={(agent) => setSelectedAgent(agent)}
-          />
-        )}
-      </main>
-    </div>
+    <>
+      <header className="site">
+        <h1>go-ai-executor</h1>
+        <TopNav active={active} role={user.role} displayName={user.display_name} />
+      </header>
+      <main>{screen}</main>
+    </>
   );
 }
