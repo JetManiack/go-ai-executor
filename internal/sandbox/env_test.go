@@ -24,7 +24,7 @@ func newEnvSandbox(t *testing.T) *Sandbox {
 // actually saw.
 func commandEnv(t *testing.T, sb *Sandbox) map[string]string {
 	t.Helper()
-	res, err := sb.ExecCommand(context.Background(), "env", 10*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), "env", nil, 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand(env): %v", err)
 	}
@@ -52,7 +52,7 @@ func TestPATHIsInheritedFromTheServer(t *testing.T) {
 	t.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	sb := newEnvSandbox(t)
 
-	res, err := sb.ExecCommand(context.Background(), "only-on-this-host", 10*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), "only-on-this-host", nil, 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestServiceCredentialsNeverReachCommands(t *testing.T) {
 	}
 
 	// Also check the raw output, in case a value leaked under another name.
-	res, err := sb.ExecCommand(context.Background(), "env", 10*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), "env", nil, 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}

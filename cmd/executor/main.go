@@ -71,12 +71,6 @@ func newRootCommand() *cli.Command {
 				Usage:   "maximum stdout/stderr a single command returns; longer output is truncated",
 				Sources: cli.EnvVars("MAX_OUTPUT_BYTES"),
 			},
-			&cli.StringFlag{
-				Name:    "shell",
-				Value:   "/bin/sh",
-				Usage:   "shell binary commands are executed with",
-				Sources: cli.EnvVars("SHELL_PATH"),
-			},
 			&cli.StringSliceFlag{
 				Name:    "env-passthrough",
 				Value:   sandbox.DefaultEnvPassthrough,
@@ -153,7 +147,6 @@ func newRootCommand() *cli.Command {
 				RootDir:           cmd.String("sandbox-dir"),
 				DefaultTimeout:    cmd.Duration("default-timeout"),
 				MaxOutputBytes:    cmd.Int("max-output-bytes"),
-				Shell:             cmd.String("shell"),
 				StreamBufferBytes: cmd.Int("stream-buffer-bytes"),
 				EnvPassthrough:    passthrough,
 				ExtraEnv:          cmd.StringSlice("env"),

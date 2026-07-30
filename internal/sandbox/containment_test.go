@@ -29,7 +29,6 @@ func escapeFixture(t *testing.T) (sb *Sandbox, outsidePath string) {
 		RootDir:        root,
 		DefaultTimeout: 5 * time.Second,
 		MaxOutputBytes: 4096,
-		Shell:          "/bin/sh",
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -115,7 +114,7 @@ func TestWorkDirCannotEscapeThroughASymlink(t *testing.T) {
 
 	// A command's working directory is handed to exec, which cannot go through
 	// os.Root, so it resolves the symlink chain itself.
-	if _, err := sb.ExecCommand(context.Background(), "pwd", time.Second, "dirlink"); err == nil {
+	if _, err := sb.ExecCommand(context.Background(), "pwd", nil, time.Second, "dirlink"); err == nil {
 		t.Error("a command ran with its working directory outside the sandbox")
 	}
 }
@@ -124,7 +123,7 @@ func TestWorkDirRejectsTraversal(t *testing.T) {
 	sb, _ := escapeFixture(t)
 
 	for _, workDir := range []string{"..", "../..", "/etc"} {
-		if _, err := sb.ExecCommand(context.Background(), "pwd", time.Second, workDir); err == nil {
+		if _, err := sb.ExecCommand(context.Background(), "pwd", nil, time.Second, workDir); err == nil {
 			t.Errorf("a command ran with work_dir %q", workDir)
 		}
 	}
@@ -138,7 +137,7 @@ func TestWorkDirRejectsTraversal(t *testing.T) {
 func TestExecCommandIsNotConfinedByTheSandbox(t *testing.T) {
 	sb, outsidePath := escapeFixture(t)
 
-	res, err := sb.ExecCommand(context.Background(), "cat "+outsidePath, 5*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), "cat", []string{outsidePath}, 5*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}

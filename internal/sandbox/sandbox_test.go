@@ -17,7 +17,6 @@ func setupTestSandbox(t *testing.T) (*sandbox.Sandbox, string) {
 		RootDir:        tempDir,
 		DefaultTimeout: 2 * time.Second,
 		MaxOutputBytes: 1024,
-		Shell:          "/bin/sh",
 	})
 	if err != nil {
 		t.Fatalf("failed to create sandbox: %v", err)
@@ -60,7 +59,7 @@ func TestExecCommand(t *testing.T) {
 	sb, _ := setupTestSandbox(t)
 	ctx := context.Background()
 
-	res, err := sb.ExecCommand(ctx, "echo 'hello world'", 1*time.Second, "")
+	res, err := sb.ExecCommand(ctx, "echo", []string{"hello world"}, 1*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand failed: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestExecCommand_Timeout(t *testing.T) {
 	sb, _ := setupTestSandbox(t)
 	ctx := context.Background()
 
-	_, err := sb.ExecCommand(ctx, "sleep 5", 500*time.Millisecond, "")
+	_, err := sb.ExecCommand(ctx, "sleep", []string{"5"}, 500*time.Millisecond, "")
 	if err == nil {
 		t.Fatal("expected command to time out, but got no error")
 	}

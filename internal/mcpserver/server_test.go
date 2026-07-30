@@ -177,20 +177,73 @@ func TestExecCommandRunsInTheAgentSandbox(t *testing.T) {
 	deps := testDeps(t, db)
 	session := connectSession(t, newTestServer(t, deps), token)
 
-	result := callTool(t, session, "exec_command", map[string]any{"command": "pwd && echo hello"})
-	if result.IsError {
-		t.Fatalf("exec_command failed: %s", contentText(result.Content))
-	}
-
 	sb, err := deps.Manager.GetSandbox(agent.ID)
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	out := contentText(result.Content)
-	if !strings.Contains(out, "hello") {
-		t.Errorf("output %q does not contain the echoed text", out)
+
+	// One program, one argument vector: there is no shell to interpret a
+	// compound command, so the working directory and the arguments are checked
+	// with separate calls.
+	pwd := callTool(t, session, "exec_command", map[string]any{"command": "pwd"})
+	if pwd.IsError {
+		t.Fatalf("exec_command(pwd) failed: %s", contentText(pwd.Content))
 	}
-	if !strings.Contains(out, sb.GetStatus().RootDir) {
+	if out := outputField(t, pwd, "stdout"); !strings.Contains(out, sb.GetStatus().RootDir) {
 		t.Errorf("output %q does not show the sandbox root as the working directory (want %q)", out, sb.GetStatus().RootDir)
+	}
+
+	echo := callTool(t, session, "exec_command", map[string]any{
+		"command": "echo",
+		"args":    []string{"hello", "world"},
+	})
+	if echo.IsError {
+		t.Fatalf("exec_command(echo) failed: %s", contentText(echo.Content))
+	}
+	if out := outputField(t, echo, "stdout"); !strings.Contains(out, "hello world") {
+		t.Errorf("stdout %q does not contain the echoed arguments", out)
+	}
+}
+
+// TestExecCommandDoesNotInterpretShellSyntax pins the contract change: a compound
+// command used to be handed to `sh -c` and interpreted. It is now a program name,
+// so it fails to resolve rather than quietly running two commands.
+func TestExecCommandDoesNotInterpretShellSyntax(t *testing.T) {
+	db := openTestDB(t)
+	_, token := mustAgentWithToken(t, db, "agent-1")
+	session := connectSession(t, newTestServer(t, testDeps(t, db)), token)
+
+	result := callTool(t, session, "exec_command", map[string]any{"command": "pwd && echo hello"})
+	if !result.IsError {
+		t.Errorf("a compound command was accepted as a program name: %s", contentText(result.Content))
+	}
+
+	// Shell metacharacters in an argument are literal text, not syntax.
+	echoed := callTool(t, session, "exec_command", map[string]any{
+		"command": "echo",
+		"args":    []string{"a && b | c > d"},
+	})
+	if echoed.IsError {
+		t.Fatalf("exec_command failed: %s", contentText(echoed.Content))
+	}
+	if out := outputField(t, echoed, "stdout"); !strings.Contains(out, "a && b | c > d") {
+		t.Errorf("stdout %q does not contain the argument verbatim", out)
+	}
+}
+
+// TestExecCommandRejectsAMissingProgram checks the error an agent gets for a
+// program that is not installed, which after this change is the shape of every
+// typo.
+func TestExecCommandRejectsAMissingProgram(t *testing.T) {
+	db := openTestDB(t)
+	_, token := mustAgentWithToken(t, db, "agent-1")
+	session := connectSession(t, newTestServer(t, testDeps(t, db)), token)
+
+	result := callTool(t, session, "exec_command", map[string]any{"command": "definitely-not-installed"})
+	if !result.IsError {
+		t.Fatal("a missing program was reported as success")
+	}
+	if message := contentText(result.Content); !strings.Contains(message, "not found in PATH") {
+		t.Errorf("error %q does not say the program was not found", message)
 	}
 }

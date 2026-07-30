@@ -90,6 +90,9 @@ function Line({ item }) {
     case "started":
       return (
         <div className="term-command">
+          {/* The rendered argument vector, quoted by the server where an
+              argument contains whitespace — there is no shell, so the argument
+              boundaries are what a reader needs to see. */}
           <span className="term-prompt">$</span>{" "}
           <span className="term-command-text">{item.command}</span>
           {item.workDir ? <span className="term-workdir"> (in {item.workDir})</span> : null}

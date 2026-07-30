@@ -55,9 +55,10 @@ func backgroundedChildPID(t *testing.T, sb *Sandbox, bus *Broadcaster) (int, <-c
 	_, sub := bus.Subscribe(sb.ID(), 0)
 	t.Cleanup(func() { bus.Unsubscribe(sb.ID(), sub) })
 
+	program, scriptArgs := shellArgs("sleep 60 & echo $!; sleep 60")
 	results := make(chan ExecResult, 1)
 	go func() {
-		res, _ := sb.ExecCommand(context.Background(), "sleep 60 & echo $!; sleep 60", commandTimeout, "")
+		res, _ := sb.ExecCommand(context.Background(), program, scriptArgs, commandTimeout, "")
 		results <- res
 	}()
 
@@ -127,10 +128,11 @@ func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 	_, sub := bus.Subscribe(sb.ID(), 0)
 	defer bus.Unsubscribe(sb.ID(), sub)
 
+	program, scriptArgs := shellArgs("sleep 60 & echo $!; sleep 60")
 	results := make(chan ExecResult, 1)
 	errs := make(chan error, 1)
 	go func() {
-		res, execErr := sb.ExecCommand(context.Background(), "sleep 60 & echo $!; sleep 60", 500*time.Millisecond, "")
+		res, execErr := sb.ExecCommand(context.Background(), program, scriptArgs, 500*time.Millisecond, "")
 		results <- res
 		errs <- execErr
 	}()
@@ -251,8 +253,8 @@ func TestKillConvergesOnProcessesForkedDuringTheKill(t *testing.T) {
 
 	results := make(chan ExecResult, 1)
 	go func() {
-		res, _ := sb.ExecCommand(context.Background(),
-			"while true; do sleep 30 & sleep 0.01; done", commandTimeout, "")
+		program, scriptArgs := shellArgs("while true; do sleep 30 & sleep 0.01; done")
+		res, _ := sb.ExecCommand(context.Background(), program, scriptArgs, commandTimeout, "")
 		results <- res
 	}()
 
@@ -278,5 +280,88 @@ func TestKillConvergesOnProcessesForkedDuringTheKill(t *testing.T) {
 	case <-results:
 	case <-time.After(promptly):
 		t.Fatal("ExecCommand did not return promptly after the kill: a process forked during the kill survived and is holding the output pipe")
+	}
+}
+
+// shellArgs runs a shell script as an explicit program, for tests whose subject
+// needs shell syntax (loops, backgrounding, redirection).
+//
+// ExecCommand no longer interprets a shell, so this is the honest way to ask for
+// one — and it is exactly what an agent would do, which is why the README says
+// removing the shell clarifies the tool's contract rather than confining it.
+func shellArgs(script string) (string, []string) {
+	return "/bin/sh", []string{"-c", script}
+}
+
+// TestStopViaCancellationTearsDownTheGroup covers the mechanism KillAll now uses:
+// it cancels the command's context rather than signalling a recorded PID, and
+// exec.Cmd's Cancel hook is what tears the process group down. If that hook were
+// ever lost, cancellation would signal only the direct child and a backgrounded
+// grandchild would survive holding the output pipe.
+func TestStopViaCancellationTearsDownTheGroup(t *testing.T) {
+	sb, bus := newStreamingSandbox(t)
+	childPID, results := backgroundedChildPID(t, sb, bus)
+
+	if !alive(childPID) {
+		t.Fatalf("backgrounded child %d is not running, so the test would prove nothing", childPID)
+	}
+
+	stopped, err := sb.KillAll("Grace", "operator stop")
+	if err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+	if stopped != 1 {
+		t.Errorf("stopped %d commands, want 1", stopped)
+	}
+
+	if !waitGone(childPID, promptly) {
+		t.Errorf("backgrounded child %d survived cancellation", childPID)
+	}
+	select {
+	case <-results:
+	case <-time.After(promptly):
+		t.Error("ExecCommand did not return promptly after cancellation")
+	}
+}
+
+// TestStopIsReportedSeparatelyFromATimeout keeps the two reasons a command was
+// cut short distinguishable. Reporting an operator's stop as a timeout would tell
+// them the command ran out of time at the moment they stopped it.
+func TestStopIsReportedSeparatelyFromATimeout(t *testing.T) {
+	sb, bus := newStreamingSandbox(t)
+	_, sub := bus.Subscribe(sb.ID(), 0)
+	defer bus.Unsubscribe(sb.ID(), sub)
+
+	program, scriptArgs := shellArgs("sleep 60")
+	errs := make(chan error, 1)
+	go func() {
+		_, err := sb.ExecCommand(context.Background(), program, scriptArgs, commandTimeout, "")
+		errs <- err
+	}()
+
+	// Wait until it is actually running, so KillAll has something to cancel.
+	deadline := time.After(promptly)
+	for sb.RunningCommands() == 0 {
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("command never started")
+		}
+	}
+
+	if _, err := sb.KillAll("Grace", "operator stop"); err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+
+	select {
+	case err := <-errs:
+		if !errors.Is(err, ErrCommandStopped) {
+			t.Errorf("error = %v, want ErrCommandStopped", err)
+		}
+		if errors.Is(err, ErrCommandTimeout) {
+			t.Error("an operator stop was reported as a timeout")
+		}
+	case <-time.After(promptly):
+		t.Fatal("ExecCommand did not return after the stop")
 	}
 }

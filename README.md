@@ -1,8 +1,8 @@
 # go-ai-executor
 
-An MCP server that gives each AI agent a jailed directory it can run shell
-commands and do file operations in, plus a web UI where a human watches those
-terminals live and can stop a sandbox that has gone wrong.
+An MCP server that gives each AI agent a jailed directory it can run programs and
+do file operations in, plus a web UI where a human watches those terminals live
+and can stop a sandbox that has gone wrong.
 
 Agents authenticate to `/mcp` with a per-agent bearer token. Humans authenticate
 to the UI through Keycloak/OIDC, and only an administrator can stop a sandbox.
@@ -13,7 +13,7 @@ to the UI through Keycloak/OIDC, and only an administrator can stop a sandbox.
 
 | Tool | Purpose |
 |---|---|
-| `exec_command` | run a shell command, with a timeout and an output cap |
+| `exec_command` | run a program with an argument vector, with a timeout and an output cap |
 | `read_file` | read a file |
 | `write_file` | write a file, creating parent directories |
 | `list_dir` | list a directory, non-recursive |
@@ -77,14 +77,33 @@ things, not on inspecting the command:
 - **Bounded output.** A per-call cap on what a tool returns, and a bounded ring
   buffer for what the terminal retains.
 
+### `exec_command` takes a program and arguments, not a command line
+
+```json
+{"command": "go", "args": ["test", "./..."], "timeout_sec": 300}
+```
+
+The program is executed directly. No shell sits between the caller and the
+process, so `&&`, `|`, `>` and globs are not interpreted — an argument containing
+them is passed through as the literal text it is. A bare program name is resolved
+against the `PATH` the command will actually run with; a name containing a `/`
+(`./build.sh`) is resolved relative to the working directory, so an agent can run
+a script it just wrote.
+
+An agent that genuinely needs shell features asks for a shell by name, which is
+explicit and visible in the terminal stream:
+
+```json
+{"command": "/bin/sh", "args": ["-c", "make build && make test"]}
+```
+
 ### What `exec_command` is not
 
-The path confinement above covers the file tools. It does **not** confine
-`exec_command`, and cannot: that tool runs a command as the server's user, so it
-reaches every file that user reaches — `cd / && rm -rf .` included. Neither the
-shell nor the `-c` is what makes this possible; dropping them and exec'ing a
-binary directly would remove pipes and `&&` while leaving `rm -rf /` exactly as
-effective.
+Removing the implicit shell makes the tool's contract unambiguous. It does **not**
+make it a boundary, and it is worth being exact about why: the path confinement
+above covers the file tools, but `exec_command` runs a program as the server's
+user, so it reaches every file that user reaches — and if a shell is installed the
+agent can invoke it deliberately, as above. `cd / && rm -rf .` remains expressible.
 
 For `exec_command` the sandbox root is a working directory, not a boundary. The
 boundary has to come from the deployment:
@@ -137,7 +156,6 @@ Every flag has an environment variable equivalent.
 | `--transport` | `TRANSPORT` | `http` | `http` (with the UI) or `stdio` |
 | `--default-timeout` | `DEFAULT_TIMEOUT` | `30s` | per-command timeout when the caller sets none |
 | `--max-output-bytes` | `MAX_OUTPUT_BYTES` | `524288` | cap on the output a tool call returns |
-| `--shell` | `SHELL_PATH` | `/bin/sh` | shell commands run under |
 | `--env-passthrough` | `ENV_PASSTHROUGH` | `PATH,LANG,LC_ALL,LC_CTYPE,TZ` | variable names commands inherit from the server |
 | `--env` | `SANDBOX_ENV` | — | extra `KEY=VALUE` entries for every command (repeatable) |
 | `--stream-buffer-bytes` | `STREAM_BUFFER_BYTES` | `262144` | terminal output retained per sandbox for replay |

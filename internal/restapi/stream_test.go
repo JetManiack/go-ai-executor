@@ -59,7 +59,7 @@ func TestStreamDeliversLiveOutput(t *testing.T) {
 		t.Fatalf("GetSandbox: %v", err)
 	}
 	go func() {
-		_, _ = sb.ExecCommand(context.Background(), "echo streamed", 10*time.Second, "")
+		_, _ = sb.ExecCommand(context.Background(), "echo", []string{"streamed"}, 10*time.Second, "")
 	}()
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -83,7 +83,7 @@ func TestStreamReplaysRetainedOutput(t *testing.T) {
 	// Output produced before anybody was watching: an operator opening the
 	// terminal after an alert must see what already happened, or there is nothing
 	// to base a kill-or-not decision on.
-	if _, err := sb.ExecCommand(context.Background(), "echo earlier", 10*time.Second, ""); err != nil {
+	if _, err := sb.ExecCommand(context.Background(), "echo", []string{"earlier"}, 10*time.Second, ""); err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestStreamReportsAGapAfterEviction(t *testing.T) {
 	}
 	// Far more output than the retention budget, so sequence number 1 is long
 	// gone by the time the watcher asks to resume from it.
-	if _, err := sb.ExecCommand(context.Background(), "for i in $(seq 1 40000); do echo line-$i; done", 60*time.Second, ""); err != nil {
+	if _, err := sb.ExecCommand(context.Background(), "/bin/sh", []string{"-c", "for i in $(seq 1 40000); do echo line-$i; done"}, 60*time.Second, ""); err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
 

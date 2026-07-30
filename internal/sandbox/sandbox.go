@@ -22,6 +22,14 @@ import (
 var (
 	ErrPathOutsideSandbox = errors.New("path is outside sandbox directory")
 	ErrCommandTimeout     = errors.New("command execution timed out")
+
+	// ErrCommandStopped reports a command cut short by cancellation — an
+	// administrator stopping the sandbox, or the calling agent disconnecting —
+	// as opposed to running out of time.
+	ErrCommandStopped = errors.New("command execution was stopped")
+
+	// ErrEmptyProgram reports a call with no program to run.
+	ErrEmptyProgram = errors.New("a program to execute is required")
 )
 
 // chunkSize is how much output is read per syscall before being published as one
@@ -39,7 +47,6 @@ type Config struct {
 	RootDir        string
 	DefaultTimeout time.Duration
 	MaxOutputBytes int
-	Shell          string
 
 	// EnvPassthrough names variables inherited from the server's environment;
 	// ExtraEnv holds literal KEY=VALUE entries. Everything else is dropped — the
@@ -69,10 +76,14 @@ type Sandbox struct {
 	root *os.Root
 
 	mu sync.RWMutex
-	// running maps an execution ID to the process group leading its process
-	// tree, so an administrator can kill everything this sandbox is running
-	// without waiting for it to finish.
-	running map[string]int
+	// running maps an execution ID to the function that cancels its context.
+	//
+	// Cancelling is how a command is stopped, rather than signalling a recorded
+	// PID: exec.Cmd's own cancellation path then runs, which is where the
+	// process-group teardown lives, and WaitDelay bounds how long Wait may block
+	// on output pipes a survivor is holding. One place decides how a command
+	// dies, and it is the same place for a timeout and for an operator.
+	running map[string]context.CancelFunc
 }
 
 type ExecResult struct {
@@ -96,7 +107,6 @@ type SandboxStatus struct {
 	RootDir        string `json:"root_dir"`
 	DefaultTimeout string `json:"default_timeout"`
 	MaxOutputBytes int    `json:"max_output_bytes"`
-	Shell          string `json:"shell"`
 
 	// EnvNames lists the variable names a command is given, without their
 	// values: an agent needs to know whether PATH or a locale is set, and has no
@@ -114,7 +124,6 @@ func DefaultConfig(rootDir string) Config {
 		RootDir:           rootDir,
 		DefaultTimeout:    30 * time.Second,
 		MaxOutputBytes:    512 << 10,
-		Shell:             "/bin/sh",
 		StreamBufferBytes: DefaultStreamBufferBytes,
 		EnvPassthrough:    slices.Clone(DefaultEnvPassthrough),
 	}
@@ -152,9 +161,6 @@ func newSandbox(id string, cfg Config, bus *Broadcaster) (*Sandbox, error) {
 	if cfg.MaxOutputBytes <= 0 {
 		cfg.MaxOutputBytes = 512 << 10
 	}
-	if cfg.Shell == "" {
-		cfg.Shell = "/bin/sh"
-	}
 	if err := ValidateEnvPassthrough(cfg.EnvPassthrough); err != nil {
 		return nil, err
 	}
@@ -168,7 +174,7 @@ func newSandbox(id string, cfg Config, bus *Broadcaster) (*Sandbox, error) {
 		return nil, fmt.Errorf("open sandbox root: %w", err)
 	}
 
-	return &Sandbox{id: id, bus: bus, config: cfg, root: root, running: make(map[string]int)}, nil
+	return &Sandbox{id: id, bus: bus, config: cfg, root: root, running: make(map[string]context.CancelFunc)}, nil
 }
 
 // relativeName turns a caller-supplied path into a name relative to the sandbox
@@ -258,10 +264,21 @@ func (s *Sandbox) resolveWorkDir(workDir string) (string, error) {
 	return resolved, nil
 }
 
-// ExecCommand runs command in the sandbox, publishing its output to watchers as
-// it is produced and returning the (possibly truncated) whole of it once the
-// command exits.
-func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.Duration, workDir string) (ExecResult, error) {
+// ExecCommand runs program with args in the sandbox, publishing its output to
+// watchers as it is produced and returning the (possibly truncated) whole of it
+// once it exits.
+//
+// The program is executed directly. There is no shell between the caller and the
+// process, so `&&`, pipes, redirections and globs are not interpreted and an
+// argument containing them is passed through as the literal text it is. That
+// makes the tool's contract unambiguous — one program, one argument vector — and
+// removes a layer that silently reinterpreted every string handed to it.
+//
+// It is not a security boundary, and this is worth stating plainly: if a shell is
+// installed, an agent can still run `/bin/sh` with `-c` as its arguments. What
+// bounds a command is the deployment (see the README), not the absence of a
+// shell here.
+func (s *Sandbox) ExecCommand(ctx context.Context, program string, args []string, timeout time.Duration, workDir string) (ExecResult, error) {
 	s.mu.RLock()
 	cfg := s.config
 	s.mu.RUnlock()
@@ -282,14 +299,28 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	env := buildEnv(cfg, targetWorkDir)
+
+	// Resolved against the PATH the command will actually run with, not the
+	// server's: exec.Command would consult os.Getenv("PATH"), so a PATH supplied
+	// through --env would be advertised to the command and then ignored when
+	// finding the program.
+	resolved, err := lookProgram(program, env)
+	if err != nil {
+		return ExecResult{}, err
+	}
+
 	execID := uuid.NewString()
-	// Running a caller-supplied command is precisely this service's purpose,
-	// so there is nothing to sanitize: what bounds it is the scrubbed
-	// environment, the working directory, the output cap, the timeout and the
-	// process group — not inspection of the command string.
-	cmd := exec.CommandContext(execCtx, cfg.Shell, "-c", command)
+	// Executing a caller-supplied program is precisely this service's purpose, so
+	// there is nothing here to sanitize. Note what did change with the move away
+	// from `$SHELL -c`: the arguments are no longer a string somebody else will
+	// reinterpret, so injection through quoting or metacharacters is not
+	// expressible — an argument is the literal bytes it is. What bounds the
+	// command is the deployment (see the README), not inspection of its argv.
+	// #nosec G204 -- see above
+	cmd := exec.CommandContext(execCtx, resolved, args...) //nolint:gosec // deliberate: see the comment above
 	cmd.Dir = targetWorkDir
-	cmd.Env = buildEnv(cfg, targetWorkDir)
+	cmd.Env = env
 	setProcessGroup(cmd)
 	// Cancel the whole process group, not just the shell: this is what makes a
 	// timeout collect backgrounded children instead of orphaning them.
@@ -302,7 +333,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 	cmd.WaitDelay = waitDelay
 
 	stdout, err := cmd.StdoutPipe()
-	if err != nil {
+	if err != nil { //nolint:dupl // the stderr pipe below reads the same by necessity
 		return ExecResult{ExecID: execID}, fmt.Errorf("open stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
@@ -315,13 +346,13 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 		return ExecResult{ExecID: execID}, fmt.Errorf("start command: %w", err)
 	}
 
-	s.trackRunning(execID, cmd.Process.Pid)
+	s.trackRunning(execID, cancel)
 	defer s.untrackRunning(execID)
 
 	s.publish(Event{
 		Kind:    EventStarted,
 		ExecID:  execID,
-		Command: command,
+		Command: commandLine(program, args),
 		WorkDir: workDir,
 	})
 
@@ -347,7 +378,8 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 		Truncated:  truncated,
 	}
 
-	if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+	switch {
+	case errors.Is(execCtx.Err(), context.DeadlineExceeded):
 		result.ExitCode = -1
 		result.Stderr += "\n[command timed out]"
 		s.publish(Event{
@@ -359,6 +391,22 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 			Reason:     "timed out after " + timeout.String(),
 		})
 		return result, ErrCommandTimeout
+
+	case errors.Is(execCtx.Err(), context.Canceled):
+		// Either an administrator stopped the sandbox or the caller went away.
+		// Both are distinct from a timeout, and reporting them as one would tell
+		// an operator the command ran out of time when they had just stopped it.
+		result.ExitCode = -1
+		result.Stderr += "\n[command stopped]"
+		s.publish(Event{
+			Kind:       EventFinished,
+			ExecID:     execID,
+			ExitCode:   -1,
+			DurationMs: durationMs,
+			Truncated:  truncated,
+			Reason:     "stopped before completion",
+		})
+		return result, ErrCommandStopped
 	}
 
 	if waitErr != nil {
@@ -431,10 +479,10 @@ func (s *Sandbox) publish(e Event) {
 	s.bus.Publish(e)
 }
 
-func (s *Sandbox) trackRunning(execID string, pid int) {
+func (s *Sandbox) trackRunning(execID string, cancel context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.running[execID] = pid
+	s.running[execID] = cancel
 }
 
 func (s *Sandbox) untrackRunning(execID string) {
@@ -450,8 +498,15 @@ func (s *Sandbox) RunningCommands() int {
 	return len(s.running)
 }
 
-// KillAll SIGKILLs the process group of every command running in this sandbox
-// and returns how many it signalled.
+// KillAll stops every command running in this sandbox and returns how many it
+// stopped.
+//
+// It cancels each command's context rather than signalling a PID directly. The
+// cancellation runs exec.Cmd's own Cancel hook, which tears down the whole
+// process group — so a backgrounded child cannot outlive the stop — and
+// WaitDelay bounds how long Wait blocks if something is still holding an output
+// pipe. Signalling requires no privilege: a process may signal another with the
+// same UID, and these are its own children.
 //
 // The kill is reported to watchers before it lands, so the terminal shows why its
 // output stopped. Entries are not removed here: each ExecCommand call untracks
@@ -459,33 +514,22 @@ func (s *Sandbox) RunningCommands() int {
 // process is really gone.
 func (s *Sandbox) KillAll(byActor, reason string) (int, error) {
 	s.mu.RLock()
-	pids := make(map[string]int, len(s.running))
-	for execID, pid := range s.running {
-		pids[execID] = pid
+	stopping := make(map[string]context.CancelFunc, len(s.running))
+	for execID, cancel := range s.running {
+		stopping[execID] = cancel
 	}
 	s.mu.RUnlock()
 
-	var killed int
-	var errs []error
-	for execID, pid := range pids {
+	for execID, cancel := range stopping {
 		s.publish(Event{
 			Kind:    EventKilled,
 			ExecID:  execID,
 			ByActor: byActor,
 			Reason:  reason,
 		})
-		if err := killProcessGroup(pid); err != nil {
-			// ESRCH means it exited between the snapshot and the signal, which
-			// is success as far as the caller is concerned.
-			if errors.Is(err, os.ErrProcessDone) || errors.Is(err, errProcessNotFound) {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("kill process group %d: %w", pid, err))
-			continue
-		}
-		killed++
+		cancel()
 	}
-	return killed, errors.Join(errs...)
+	return len(stopping), nil
 }
 
 func (s *Sandbox) ReadFile(relPath string) ([]byte, error) {
@@ -593,7 +637,6 @@ func (s *Sandbox) GetStatus() SandboxStatus {
 		RootDir:        s.config.RootDir,
 		DefaultTimeout: s.config.DefaultTimeout.String(),
 		MaxOutputBytes: s.config.MaxOutputBytes,
-		Shell:          s.config.Shell,
 		EnvNames:       envNames(buildEnv(s.config, s.config.RootDir)),
 		RunningCommand: len(s.running),
 	}

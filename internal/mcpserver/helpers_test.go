@@ -55,7 +55,6 @@ func newTestManager(t *testing.T) *sandbox.Manager {
 		RootDir:        t.TempDir(),
 		DefaultTimeout: 5 * time.Second,
 		MaxOutputBytes: 64 << 10,
-		Shell:          "/bin/sh",
 		EnvPassthrough: sandbox.DefaultEnvPassthrough,
 	})
 	if err != nil {
@@ -119,6 +118,29 @@ func contentText(content []mcp.Content) string {
 		}
 	}
 	return sb.String()
+}
+
+// outputField reads one field of a tool's structured output.
+//
+// Preferred over substring-matching the text content when the value can contain
+// characters encoding/json escapes: `&&` arrives as \u0026\u0026 and `>` as
+// \u003e in the JSON text, so a raw substring check on it fails for output that
+// is in fact correct.
+func outputField(t *testing.T, result *mcp.CallToolResult, key string) string {
+	t.Helper()
+	fields, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structured content is %T, want a JSON object", result.StructuredContent)
+	}
+	value, present := fields[key]
+	if !present {
+		t.Fatalf("structured output has no %q field: %v", key, fields)
+	}
+	text, ok := value.(string)
+	if !ok {
+		t.Fatalf("field %q is %T, want a string", key, value)
+	}
+	return text
 }
 
 // connectSession returns a connected MCP client session against server,

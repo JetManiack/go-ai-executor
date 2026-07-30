@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+// shellProgram and shellScript spell out a shell invocation for the tests whose
+// subject is streaming rather than execution policy, and which therefore need
+// loops, redirection and sequencing.
+//
+// ExecCommand no longer interprets a shell, so asking for one explicitly is both
+// the honest way to write these and a demonstration of the documented caveat: a
+// shell is just another program an agent can run.
+const shellProgram = "/bin/sh"
+
+func shellScript(script string) []string { return []string{"-c", script} }
+
 // newStreamingSandbox builds a manager-backed sandbox, which is the only kind
 // with an event bus attached.
 func newStreamingSandbox(t *testing.T) (*Sandbox, *Broadcaster) {
@@ -69,7 +80,7 @@ func TestOutputIsStreamedWhileTheCommandRuns(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = sb.ExecCommand(context.Background(), "echo early; sleep 2", 10*time.Second, "")
+		_, _ = sb.ExecCommand(context.Background(), shellProgram, shellScript("echo early; sleep 2"), 10*time.Second, "")
 	}()
 
 	deadline := time.After(5 * time.Second)
@@ -93,7 +104,7 @@ func TestExecPublishesStartedOutputAndFinished(t *testing.T) {
 	defer bus.Unsubscribe(sb.ID(), sub)
 
 	collected := collectAsync(sub)
-	res, err := sb.ExecCommand(context.Background(), "echo out; echo err 1>&2", 10*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), shellProgram, shellScript("echo out; echo err 1>&2"), 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
@@ -106,8 +117,12 @@ func TestExecPublishesStartedOutputAndFinished(t *testing.T) {
 	if events[0].Kind != EventStarted {
 		t.Errorf("first event kind = %q, want %q", events[0].Kind, EventStarted)
 	}
-	if events[0].Command != "echo out; echo err 1>&2" {
-		t.Errorf("started event command = %q, want the command that ran", events[0].Command)
+	// The started event carries the rendered argument vector, quoted where an
+	// argument contains whitespace — with no shell, a watcher has to be able to
+	// see where one argument ends and the next begins.
+	wantCommand := `/bin/sh -c "echo out; echo err 1>&2"`
+	if events[0].Command != wantCommand {
+		t.Errorf("started event command = %q, want %q", events[0].Command, wantCommand)
 	}
 
 	last := events[len(events)-1]
@@ -150,7 +165,7 @@ func TestStreamedChunksReassembleToTheReturnedOutput(t *testing.T) {
 
 	// More than one chunk's worth, so reassembly is actually exercised.
 	collected := collectAsync(sub)
-	res, err := sb.ExecCommand(context.Background(), "for i in $(seq 1 5000); do echo line-$i; done", 30*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), shellProgram, shellScript("for i in $(seq 1 5000); do echo line-$i; done"), 30*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
@@ -181,8 +196,8 @@ func TestMultiByteOutputSurvivesChunkBoundaries(t *testing.T) {
 	// mid-character.
 	const repeats = 20000
 	collected := collectAsync(sub)
-	res, err := sb.ExecCommand(context.Background(),
-		"for i in $(seq 1 "+itoa(repeats)+"); do printf '☃'; done", 60*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), shellProgram,
+		shellScript("for i in $(seq 1 "+itoa(repeats)+"); do printf '☃'; done"), 60*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
@@ -222,7 +237,7 @@ func TestExitCodeIsReportedNotTreatedAsFailure(t *testing.T) {
 	sb, _ := newStreamingSandbox(t)
 
 	// A non-zero exit is a successful tool call reporting a failed command.
-	res, err := sb.ExecCommand(context.Background(), "exit 3", 10*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), shellProgram, shellScript("exit 3"), 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand returned an error for a non-zero exit: %v", err)
 	}
@@ -246,7 +261,7 @@ func TestTruncationBoundsTheReturnedOutputOnly(t *testing.T) {
 	defer mgr.Broadcaster().Unsubscribe(sb.ID(), sub)
 
 	collected := collectAsync(sub)
-	res, err := sb.ExecCommand(context.Background(), "for i in $(seq 1 2000); do echo line-$i; done", 30*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), shellProgram, shellScript("for i in $(seq 1 2000); do echo line-$i; done"), 30*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}

@@ -75,8 +75,3 @@ func killProcessGroup(pid int) error {
 
 	return firstErr
 }
-
-// errProcessNotFound is the "no such process" errno, which KillAll treats as
-// success: it means the process exited between the snapshot of running commands
-// and the signal.
-var errProcessNotFound = syscall.ESRCH
