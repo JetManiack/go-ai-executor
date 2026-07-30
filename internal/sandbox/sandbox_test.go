@@ -119,9 +119,22 @@ func TestFilesystemOperations(t *testing.T) {
 	}
 
 	// Delete File
-	err = sb.DeleteFile("test/hello.txt")
+	deleted, err := sb.DeleteFile("test/hello.txt")
 	if err != nil {
 		t.Fatalf("DeleteFile failed: %v", err)
+	}
+	if !deleted.Existed || deleted.WasDirectory {
+		t.Errorf("delete result = %+v, want an existing non-directory", deleted)
+	}
+
+	// RemoveAll succeeds on a path that was never there, so the result is the
+	// only way an agent can tell that apart from a real deletion.
+	missing, err := sb.DeleteFile("test/never-existed.txt")
+	if err != nil {
+		t.Fatalf("DeleteFile on a missing path: %v", err)
+	}
+	if missing.Existed {
+		t.Errorf("delete result = %+v, want Existed false", missing)
 	}
 	_, err = sb.ReadFile("test/hello.txt")
 	if err == nil {

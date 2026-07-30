@@ -13,6 +13,14 @@ linters:
       exclude-functions:
         - (io.Closer).Close
         - (*database/sql.Conn).Close
+        # The only *os.File closed in this codebase is a directory handle opened
+        # to list entries (sandbox.ListDir) — read-only, so a Close failure says
+        # nothing the caller can act on. Note this exclusion would also hide a
+        # failed Close on a *written* file, where the error does matter because
+        # buffered data may never have reached disk; writes here go through
+        # os.Root.WriteFile, which closes and reports for itself. Any future code
+        # that closes a file it wrote must check it explicitly.
+        - (*os.File).Close
 
     staticcheck:
       checks:

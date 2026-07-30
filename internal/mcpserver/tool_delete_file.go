@@ -13,7 +13,9 @@ type DeleteFileInput struct {
 }
 
 type DeleteFileOutput struct {
-	Path string `json:"path" jsonschema:"the path that was deleted, as given"`
+	Path         string `json:"path" jsonschema:"the path that was deleted, as given"`
+	Existed      bool   `json:"existed" jsonschema:"false when there was nothing at that path to delete"`
+	WasDirectory bool   `json:"was_directory" jsonschema:"true when the path was a directory and its whole subtree was removed"`
 }
 
 func deleteFileHandler(deps Deps) mcp.ToolHandlerFor[DeleteFileInput, DeleteFileOutput] {
@@ -25,9 +27,14 @@ func deleteFileHandler(deps Deps) mcp.ToolHandlerFor[DeleteFileInput, DeleteFile
 		if err != nil {
 			return nil, DeleteFileOutput{}, err
 		}
-		if err := sb.DeleteFile(in.Path); err != nil {
+		result, err := sb.DeleteFile(in.Path)
+		if err != nil {
 			return nil, DeleteFileOutput{}, fmt.Errorf("delete: %w", err)
 		}
-		return nil, DeleteFileOutput{Path: in.Path}, nil
+		return nil, DeleteFileOutput{
+			Path:         in.Path,
+			Existed:      result.Existed,
+			WasDirectory: result.WasDirectory,
+		}, nil
 	}
 }

@@ -47,6 +47,18 @@ func CreateAgent(db *gorm.DB, displayName string) (*Actor, error) {
 		return nil, ErrEmptyDisplayName
 	}
 
+	// Probed before inserting, not only after failing: registering a name twice
+	// is ordinary user error answered with a 400, and letting it reach the
+	// unique index makes GORM log "UNIQUE constraint failed" at WARN — which
+	// reads to an operator like a database problem, and teaches them to skim
+	// past the level real problems arrive at.
+	var existing Actor
+	if err := db.Where("display_name = ?", displayName).First(&existing).Error; err == nil {
+		return nil, ErrDisplayNameConflict
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("check display name: %w", err)
+	}
+
 	actor := &Actor{
 		ID:          uuid.NewString(),
 		DisplayName: displayName,
@@ -54,10 +66,9 @@ func CreateAgent(db *gorm.DB, displayName string) (*Actor, error) {
 		CreatedAt:   time.Now().UTC(),
 	}
 	if err := db.Create(actor).Error; err != nil {
-		// Actor.DisplayName carries a unique index, so this is the expected
-		// outcome of registering the same agent name twice — a 400-shaped
-		// problem, not a 500-shaped one.
-		var existing Actor
+		// The index is still the authority: two concurrent registrations of the
+		// same name both pass the probe above, and one of them lands here. That
+		// case is rare enough that its log line is worth having.
 		if db.Where("display_name = ?", displayName).First(&existing).Error == nil {
 			return nil, ErrDisplayNameConflict
 		}

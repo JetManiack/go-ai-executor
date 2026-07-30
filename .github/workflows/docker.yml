@@ -1,0 +1,121 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/jetmaniack/go-ai-executor
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install esbuild
+        run: npm install --global esbuild@0.28.1
+      - name: Test
+        run: make test
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # Builds the actual Dockerfile (single amd64 platform, loaded locally,
+      # not pushed) and boots it before the real multi-platform push below.
+      # `make test` only validates the Go build; it never proves the image this
+      # workflow ships actually serves what it's supposed to. This step boots
+      # the real image and requests the paths a browser actually requests, so a
+      # missing embedded asset fails here instead of in production.
+      - name: Smoke test image
+        run: |
+          docker buildx build --load -t smoke-test:latest .
+          docker run -d --name smoke-test -p 18080:8080 -e AUTH_STUB=true smoke-test:latest
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:18080/livez >/dev/null && break
+            sleep 0.5
+          done
+          fail=0
+          for path in /livez /readyz / /js/app.bundle.js \
+              /js/vendor/react.production.min.js \
+              /js/vendor/react-dom.production.min.js \
+              /fonts/space-grotesk.woff2 \
+              /fonts/ibm-plex-sans.woff2 \
+              /fonts/jetbrains-mono.woff2 \
+              /api/me \
+              /api/sandboxes; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:18080$path")
+            echo "$path -> $code"
+            if [ "$code" != "200" ]; then
+              echo "::error::$path returned $code, want 200"
+              fail=1
+            fi
+          done
+          # /mcp must reject an unauthenticated call — a 200 here would mean
+          # the bearer-token middleware stopped being wired in.
+          mcp_code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+            "http://localhost:18080/mcp")
+          echo "/mcp (no token) -> $mcp_code"
+          if [ "$mcp_code" != "401" ]; then
+            echo "::error::/mcp returned $mcp_code without a token, want 401"
+            fail=1
+          fi
+          docker logs smoke-test
+          docker rm -f smoke-test
+          exit $fail
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

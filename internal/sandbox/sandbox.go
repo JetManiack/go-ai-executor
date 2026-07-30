@@ -49,6 +49,17 @@ type Sandbox struct {
 	bus    *Broadcaster
 	config Config
 
+	// root confines every file operation to the sandbox directory. A string
+	// check on the path is not enough: an agent can create a symlink inside its
+	// own sandbox (nothing stops `ln -s /etc/passwd link`), and that path passes
+	// any purely lexical containment test while os.ReadFile follows it straight
+	// out. os.Root refuses to traverse a link that leaves the root, in the
+	// kernel rather than in our arithmetic.
+	//
+	// Never closed: a sandbox lives as long as the process, and closing the
+	// root would break every subsequent call for that agent.
+	root *os.Root
+
 	mu sync.RWMutex
 	// running maps an execution ID to the process group leading its process
 	// tree, so an administrator can kill everything this sandbox is running
@@ -137,7 +148,39 @@ func newSandbox(id string, cfg Config, bus *Broadcaster) (*Sandbox, error) {
 	}
 	cfg.RootDir = absRoot
 
-	return &Sandbox{id: id, bus: bus, config: cfg, running: make(map[string]int)}, nil
+	root, err := os.OpenRoot(absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open sandbox root: %w", err)
+	}
+
+	return &Sandbox{id: id, bus: bus, config: cfg, root: root, running: make(map[string]int)}, nil
+}
+
+// relativeName turns a caller-supplied path into a name relative to the sandbox
+// root, which is what os.Root's methods take.
+//
+// An absolute path is accepted only if it already points inside the root, for
+// callers echoing back a path this package handed them. os.Root would reject an
+// escaping name on its own; the explicit check here is what makes the error say
+// so in this package's own terms.
+func (s *Sandbox) relativeName(relPath string) (string, error) {
+	cleaned := filepath.Clean(relPath)
+	if cleaned == "" || cleaned == "." {
+		return ".", nil
+	}
+
+	if filepath.IsAbs(cleaned) {
+		rel, err := filepath.Rel(s.config.RootDir, cleaned)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrPathOutsideSandbox, err)
+		}
+		cleaned = rel
+	}
+
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %s", ErrPathOutsideSandbox, relPath)
+	}
+	return cleaned, nil
 }
 
 // ID returns the actor ID this sandbox belongs to, empty for a standalone one.
@@ -168,6 +211,38 @@ func (s *Sandbox) ResolvePath(relPath string) (string, error) {
 	return target, nil
 }
 
+// resolveWorkDir returns the absolute directory a command should run in.
+//
+// exec needs a path, not a name in a root, so this cannot go through os.Root the
+// way the file operations do — it resolves the symlink chain itself and then
+// checks containment against the (already symlink-resolved) sandbox root.
+//
+// Note what this does and does not buy: exec_command runs an arbitrary shell
+// command as the server's user, so it is not confined by the sandbox at all and
+// can read anything that user can. Keeping the working directory inside the
+// sandbox is about the tools behaving as documented, not about containment —
+// which the README states plainly.
+func (s *Sandbox) resolveWorkDir(workDir string) (string, error) {
+	name, err := s.relativeName(workDir)
+	if err != nil {
+		return "", err
+	}
+
+	absPath := filepath.Join(s.config.RootDir, name)
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// A working directory that does not exist yet is a plain user error; say
+		// so rather than reporting it as an escape.
+		return "", fmt.Errorf("%w: %v", ErrPathOutsideSandbox, err)
+	}
+
+	rel, err := filepath.Rel(s.config.RootDir, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: %s", ErrPathOutsideSandbox, workDir)
+	}
+	return resolved, nil
+}
+
 // ExecCommand runs command in the sandbox, publishing its output to watchers as
 // it is produced and returning the (possibly truncated) whole of it once the
 // command exits.
@@ -182,7 +257,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 
 	targetWorkDir := cfg.RootDir
 	if workDir != "" {
-		resolved, err := s.ResolvePath(workDir)
+		resolved, err := s.resolveWorkDir(workDir)
 		if err != nil {
 			return ExecResult{}, fmt.Errorf("invalid working directory: %w", err)
 		}
@@ -193,7 +268,12 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 	defer cancel()
 
 	execID := uuid.NewString()
-	cmd := exec.CommandContext(execCtx, cfg.Shell, "-c", command) //nolint:gosec // running an arbitrary command is this service's purpose; containment is the sandbox root, the scrubbed environment and the process group, not command inspection
+	// Running a caller-supplied command is precisely this service's purpose,
+	// so there is nothing to sanitize: what bounds it is the scrubbed
+	// environment, the working directory, the output cap, the timeout and the
+	// process group — not inspection of the command string.
+	// #nosec G204 -- see above
+	cmd := exec.CommandContext(execCtx, cfg.Shell, "-c", command) //nolint:gosec // deliberate: see the comment above
 	cmd.Dir = targetWorkDir
 	cmd.Env = append(append([]string{}, cfg.AllowedEnvs...),
 		"HOME="+cfg.RootDir,
@@ -398,34 +478,42 @@ func (s *Sandbox) KillAll(byActor, reason string) (int, error) {
 }
 
 func (s *Sandbox) ReadFile(relPath string) ([]byte, error) {
-	absPath, err := s.ResolvePath(relPath)
+	name, err := s.relativeName(relPath)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(absPath)
+	return s.root.ReadFile(name)
 }
 
 func (s *Sandbox) WriteFile(relPath string, data []byte, perm os.FileMode) error {
-	absPath, err := s.ResolvePath(relPath)
+	name, err := s.relativeName(relPath)
 	if err != nil {
 		return err
 	}
 	if perm == 0 {
 		perm = 0o644
 	}
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o750); err != nil {
-		return fmt.Errorf("create directory structure: %w", err)
+	if dir := filepath.Dir(name); dir != "." {
+		if err := s.root.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("create directory structure: %w", err)
+		}
 	}
-	return os.WriteFile(absPath, data, perm)
+	return s.root.WriteFile(name, data, perm)
 }
 
 func (s *Sandbox) ListDir(relPath string) ([]FileInfo, error) {
-	absPath, err := s.ResolvePath(relPath)
+	name, err := s.relativeName(relPath)
 	if err != nil {
 		return nil, err
 	}
 
-	entries, err := os.ReadDir(absPath)
+	dir, err := s.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -438,9 +526,9 @@ func (s *Sandbox) ListDir(relPath string) ([]FileInfo, error) {
 			// longer part of the listing.
 			continue
 		}
-		entryRelPath, err := filepath.Rel(s.config.RootDir, filepath.Join(absPath, entry.Name()))
-		if err != nil {
-			entryRelPath = entry.Name()
+		entryRelPath := entry.Name()
+		if name != "." {
+			entryRelPath = filepath.Join(name, entry.Name())
 		}
 		results = append(results, FileInfo{
 			Name:    entry.Name(),
@@ -453,15 +541,37 @@ func (s *Sandbox) ListDir(relPath string) ([]FileInfo, error) {
 	return results, nil
 }
 
-func (s *Sandbox) DeleteFile(relPath string) error {
-	absPath, err := s.ResolvePath(relPath)
+// DeleteResult describes what a delete actually removed.
+//
+// RemoveAll succeeds on a path that was never there, so without this an agent
+// cannot tell "deleted" from "there was nothing to delete" — and cannot tell that
+// it just removed a whole subtree rather than one file.
+type DeleteResult struct {
+	Existed      bool `json:"existed"`
+	WasDirectory bool `json:"was_directory"`
+}
+
+func (s *Sandbox) DeleteFile(relPath string) (DeleteResult, error) {
+	name, err := s.relativeName(relPath)
 	if err != nil {
-		return err
+		return DeleteResult{}, err
 	}
-	if absPath == s.config.RootDir {
-		return errors.New("cannot delete the sandbox root directory")
+	if name == "." {
+		return DeleteResult{}, errors.New("cannot delete the sandbox root directory")
 	}
-	return os.RemoveAll(absPath)
+
+	// Lstat, not Stat: a symlink is deleted as a link, so what matters is what
+	// the entry itself is, not what it points at.
+	var result DeleteResult
+	if info, statErr := s.root.Lstat(name); statErr == nil {
+		result.Existed = true
+		result.WasDirectory = info.IsDir()
+	}
+
+	if err := s.root.RemoveAll(name); err != nil {
+		return DeleteResult{}, err
+	}
+	return result, nil
 }
 
 func (s *Sandbox) GetStatus() SandboxStatus {

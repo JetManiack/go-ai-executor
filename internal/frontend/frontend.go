@@ -1,3 +1,4 @@
+// Package frontend embeds and serves the built web UI.
 package frontend
 
 import (
