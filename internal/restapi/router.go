@@ -10,14 +10,14 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	"go-ai-executor/internal/humanauth"
-	"go-ai-executor/internal/sandbox"
-	"go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/humanauth"
+	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 type RouterOptions struct {
-	DB          *gorm.DB
-	Manager     *sandbox.Manager
+	DB           *gorm.DB
+	Manager      *sandbox.Manager
 	AuthProvider humanauth.Provider
 }
 
@@ -130,7 +130,7 @@ func NewRouter(opts RouterOptions) http.Handler {
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
-		broadcaster := opts.Manager.GetBroadcaster()
+		broadcaster := opts.Manager.Broadcaster()
 		ch, unsubscribe := broadcaster.Subscribe(agentID)
 		defer unsubscribe()
 
@@ -192,7 +192,7 @@ func NewRouter(opts RouterOptions) http.Handler {
 		}
 
 		// Broadcast to live stream subscribers
-		opts.Manager.GetBroadcaster().Publish(event)
+		opts.Manager.Broadcaster().Publish(event)
 
 		// Save to database
 		_ = storage.RecordExecLog(opts.DB, &storage.ExecLog{

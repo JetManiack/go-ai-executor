@@ -1,4 +1,4 @@
-module go-ai-executor
+module github.com/JetManiack/go-ai-executor
 
 go 1.26
 

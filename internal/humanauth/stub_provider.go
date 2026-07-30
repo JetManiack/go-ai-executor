@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
-	"go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 type StubProvider struct {

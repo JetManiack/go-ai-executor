@@ -3,7 +3,7 @@ package humanauth
 import (
 	"net/http"
 
-	"go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 type HumanIdentity struct {

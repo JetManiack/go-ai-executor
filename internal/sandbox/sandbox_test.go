@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 )
 
 func setupTestSandbox(t *testing.T) (*sandbox.Sandbox, string) {

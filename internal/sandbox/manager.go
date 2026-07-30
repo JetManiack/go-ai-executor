@@ -32,7 +32,9 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-func (m *Manager) GetBroadcaster() *Broadcaster {
+// Broadcaster returns the manager's event bus, which fans sandbox output out
+// to the humans watching a terminal.
+func (m *Manager) Broadcaster() *Broadcaster {
 	return m.broadcaster
 }
 

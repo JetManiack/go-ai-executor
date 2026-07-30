@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {

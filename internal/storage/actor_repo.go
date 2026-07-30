@@ -35,6 +35,27 @@ func CreateAgent(db *gorm.DB, displayName string) (*Actor, error) {
 	return actor, nil
 }
 
+// StdioActorName is the display name of the Actor every stdio-transport tool
+// call is attributed to. The stdio transport has no credentials to
+// authenticate, so it gets one durable identity rather than an exemption:
+// without it, stdio would be the one path that bypasses per-agent sandbox
+// isolation and block enforcement.
+const StdioActorName = "stdio-local"
+
+// GetOrCreateStdioActor returns the Actor backing the stdio transport,
+// creating it on first use.
+func GetOrCreateStdioActor(db *gorm.DB) (*Actor, error) {
+	var actor Actor
+	err := db.Where("kind = ? AND display_name = ?", ActorKindAgent, StdioActorName).First(&actor).Error
+	if err == nil {
+		return &actor, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	return CreateAgent(db, StdioActorName)
+}
+
 func GetActorByID(db *gorm.DB, id string) (*Actor, error) {
 	var actor Actor
 	if err := db.First(&actor, "id = ?", id).Error; err != nil {

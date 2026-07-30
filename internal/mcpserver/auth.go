@@ -2,50 +2,61 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
 	"gorm.io/gorm"
 
-	"go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
-type agentContextKey string
+type contextKey string
 
-const agentIDContextKey agentContextKey = "agent_id"
+const actorContextKey contextKey = "actor"
 
-func ContextWithAgentID(ctx context.Context, agentID string) context.Context {
-	return context.WithValue(ctx, agentIDContextKey, agentID)
+// ErrNoActor is returned by tool handlers reached without an authenticated
+// actor in the request context.
+var ErrNoActor = errors.New("no authenticated actor in context")
+
+func withActor(ctx context.Context, actor *storage.Actor) context.Context {
+	return context.WithValue(ctx, actorContextKey, actor)
 }
 
-func AgentIDFromContext(ctx context.Context) (string, bool) {
-	agentID, ok := ctx.Value(agentIDContextKey).(string)
-	return agentID, ok
+// ActorFromContext returns the Actor authenticated for the current request,
+// if any. Tool handlers need the whole Actor, not just its ID: the ID selects
+// the sandbox directory, and the display name goes into the terminal stream
+// and into the message an agent sees when its sandbox is blocked.
+func ActorFromContext(ctx context.Context) (*storage.Actor, bool) {
+	actor, ok := ctx.Value(actorContextKey).(*storage.Actor)
+	return actor, ok
 }
 
-// RequireAgentToken validates the HTTP Bearer token against the AgentCredential database.
+// WithActorForTesting injects actor into ctx the same way RequireAgentToken
+// does, for tests that exercise tool handlers without an HTTP round trip.
+func WithActorForTesting(ctx context.Context, actor *storage.Actor) context.Context {
+	return withActor(ctx, actor)
+}
+
+// RequireAgentToken authenticates every request by its Authorization: Bearer
+// header and injects the resulting Actor into the request context for
+// downstream MCP tool handlers to read via ActorFromContext.
 func RequireAgentToken(db *gorm.DB, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || token == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="executor"`)
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			http.Error(w, `{"error":"invalid authorization header format, expected Bearer <token>"}`, http.StatusUnauthorized)
-			return
-		}
-
-		rawToken := parts[1]
-		actor, err := storage.AuthenticateAgentToken(db, rawToken)
+		actor, err := storage.AuthenticateAgentToken(db, token)
 		if err != nil {
-			http.Error(w, `{"error":"invalid or revoked bearer token"}`, http.StatusUnauthorized)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="executor", error="invalid_token"`)
+			http.Error(w, "invalid or revoked token", http.StatusUnauthorized)
 			return
 		}
 
-		ctx := ContextWithAgentID(r.Context(), actor.ID)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r.WithContext(withActor(r.Context(), actor)))
 	})
 }

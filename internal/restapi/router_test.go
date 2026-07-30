@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"go-ai-executor/internal/humanauth"
-	"go-ai-executor/internal/restapi"
-	"go-ai-executor/internal/sandbox"
-	"go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/humanauth"
+	"github.com/JetManiack/go-ai-executor/internal/restapi"
+	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 func setupTestAPI(t *testing.T) (http.Handler, *storage.Actor) {
@@ -36,8 +36,8 @@ func setupTestAPI(t *testing.T) (http.Handler, *storage.Actor) {
 	}
 
 	router := restapi.NewRouter(restapi.RouterOptions{
-		DB:          db,
-		Manager:     mgr,
+		DB:           db,
+		Manager:      mgr,
 		AuthProvider: authProvider,
 	})
 

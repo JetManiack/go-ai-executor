@@ -32,11 +32,11 @@ type UserIdentity struct {
 }
 
 type Session struct {
-	ID                   string    `gorm:"type:char(36);primaryKey"`
-	ActorID              string    `gorm:"type:char(36);not null;index"`
-	RefreshTokenEncrypted string   `gorm:"type:text;not null"`
-	ExpiresAt            time.Time `gorm:"not null;index"`
-	CreatedAt            time.Time `gorm:"not null"`
+	ID                    string    `gorm:"type:char(36);primaryKey"`
+	ActorID               string    `gorm:"type:char(36);not null;index"`
+	RefreshTokenEncrypted string    `gorm:"type:text;not null"`
+	ExpiresAt             time.Time `gorm:"not null;index"`
+	CreatedAt             time.Time `gorm:"not null"`
 }
 
 type ExecLog struct {
