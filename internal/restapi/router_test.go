@@ -81,14 +81,4 @@ func TestAgentsEndpoints(t *testing.T) {
 		t.Fatalf("expected status 201 Created, got %d", rec.Code)
 	}
 
-	// 4. POST /agents/{id}/exec (manual command execution)
-	execBody, _ := json.Marshal(map[string]string{"command": "echo 'ui exec test'"})
-	req = httptest.NewRequest("POST", "/agents/"+agent.ID+"/exec", bytes.NewBuffer(execBody))
-	req.Header.Set("Content-Type", "application/json")
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200 OK, got %d", rec.Code)
-	}
 }

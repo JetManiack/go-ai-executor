@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,27 +13,25 @@ import (
 )
 
 var (
-	ErrActorNotFound      = errors.New("actor not found")
-	ErrCredentialNotFound = errors.New("agent credential not found")
-	ErrTokenRevoked       = errors.New("agent token revoked")
+	ErrActorNotFound       = errors.New("actor not found")
+	ErrCredentialNotFound  = errors.New("agent credential not found")
+	ErrTokenRevoked        = errors.New("agent token revoked")
+	ErrEmptyDisplayName    = errors.New("display name is required")
+	ErrDisplayNameConflict = errors.New("an actor with that display name already exists")
 )
 
-func HashToken(rawToken string) string {
+// hashToken is how a bearer token is stored: only its SHA-256 digest ever
+// reaches the database, so reading the credentials table yields nothing usable
+// as a token.
+func hashToken(rawToken string) string {
 	sum := sha256.Sum256([]byte(rawToken))
 	return hex.EncodeToString(sum[:])
 }
 
-func CreateAgent(db *gorm.DB, displayName string) (*Actor, error) {
-	actor := &Actor{
-		ID:          uuid.New().String(),
-		DisplayName: displayName,
-		Kind:        ActorKindAgent,
-		CreatedAt:   time.Now().UTC(),
-	}
-	if err := db.Create(actor).Error; err != nil {
-		return nil, fmt.Errorf("failed to create agent: %w", err)
-	}
-	return actor, nil
+// HashTokenForTesting exposes hashToken for tests that construct credential
+// rows directly instead of going through IssueAgentToken.
+func HashTokenForTesting(rawToken string) string {
+	return hashToken(rawToken)
 }
 
 // StdioActorName is the display name of the Actor every stdio-transport tool
@@ -42,8 +41,33 @@ func CreateAgent(db *gorm.DB, displayName string) (*Actor, error) {
 // isolation and block enforcement.
 const StdioActorName = "stdio-local"
 
-// GetOrCreateStdioActor returns the Actor backing the stdio transport,
-// creating it on first use.
+func CreateAgent(db *gorm.DB, displayName string) (*Actor, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return nil, ErrEmptyDisplayName
+	}
+
+	actor := &Actor{
+		ID:          uuid.NewString(),
+		DisplayName: displayName,
+		Kind:        ActorKindAgent,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := db.Create(actor).Error; err != nil {
+		// Actor.DisplayName carries a unique index, so this is the expected
+		// outcome of registering the same agent name twice — a 400-shaped
+		// problem, not a 500-shaped one.
+		var existing Actor
+		if db.Where("display_name = ?", displayName).First(&existing).Error == nil {
+			return nil, ErrDisplayNameConflict
+		}
+		return nil, fmt.Errorf("create agent: %w", err)
+	}
+	return actor, nil
+}
+
+// GetOrCreateStdioActor returns the Actor backing the stdio transport, creating
+// it on first use.
 func GetOrCreateStdioActor(db *gorm.DB) (*Actor, error) {
 	var actor Actor
 	err := db.Where("kind = ? AND display_name = ?", ActorKindAgent, StdioActorName).First(&actor).Error
@@ -75,21 +99,24 @@ func ListAgents(db *gorm.DB) ([]Actor, error) {
 	return agents, nil
 }
 
+// IssueAgentToken mints a new bearer token for actorID and returns it in the
+// clear exactly once — only its hash is stored, so a lost token can be replaced
+// but never recovered.
 func IssueAgentToken(db *gorm.DB, actorID string) (string, *AgentCredential, error) {
-	rawToken := "age_" + uuid.New().String()
-	tokenHash := HashToken(rawToken)
+	if _, err := GetActorByID(db, actorID); err != nil {
+		return "", nil, err
+	}
 
+	rawToken := "age_" + uuid.NewString()
 	cred := &AgentCredential{
-		ID:        uuid.New().String(),
+		ID:        uuid.NewString(),
 		ActorID:   actorID,
-		TokenHash: tokenHash,
+		TokenHash: hashToken(rawToken),
 		CreatedAt: time.Now().UTC(),
 	}
-
 	if err := db.Create(cred).Error; err != nil {
-		return "", nil, fmt.Errorf("failed to issue agent token: %w", err)
+		return "", nil, fmt.Errorf("issue agent token: %w", err)
 	}
-
 	return rawToken, cred, nil
 }
 
@@ -103,7 +130,9 @@ func ListAgentCredentials(db *gorm.DB, actorID string) ([]AgentCredential, error
 
 func RevokeAgentToken(db *gorm.DB, credID string) error {
 	now := time.Now().UTC()
-	result := db.Model(&AgentCredential{}).Where("id = ? AND revoked_at IS NULL", credID).Update("revoked_at", now)
+	result := db.Model(&AgentCredential{}).
+		Where("id = ? AND revoked_at IS NULL", credID).
+		Update("revoked_at", now)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -113,10 +142,40 @@ func RevokeAgentToken(db *gorm.DB, credID string) error {
 	return nil
 }
 
+// RevokeAllAgentCredentials revokes every credential belonging to actorID. This
+// is how an agent is decommissioned: the Actor row stays, so blocks and
+// sandboxes recorded against it keep a named owner rather than pointing at a
+// vanished actor.
+func RevokeAllAgentCredentials(db *gorm.DB, actorID string) error {
+	now := time.Now().UTC()
+	return db.Model(&AgentCredential{}).
+		Where("actor_id = ? AND revoked_at IS NULL", actorID).
+		Update("revoked_at", now).Error
+}
+
+// ActorsWithActiveToken reports which actors still hold at least one
+// unrevoked credential, so the UI can distinguish a usable agent from a
+// decommissioned one without a query per row.
+func ActorsWithActiveToken(db *gorm.DB) (map[string]bool, error) {
+	var actorIDs []string
+	if err := db.Model(&AgentCredential{}).
+		Where("revoked_at IS NULL").
+		Distinct().
+		Pluck("actor_id", &actorIDs).Error; err != nil {
+		return nil, err
+	}
+	active := make(map[string]bool, len(actorIDs))
+	for _, id := range actorIDs {
+		active[id] = true
+	}
+	return active, nil
+}
+
+// AuthenticateAgentToken resolves a raw bearer token to the Actor that owns it,
+// rejecting revoked credentials.
 func AuthenticateAgentToken(db *gorm.DB, rawToken string) (*Actor, error) {
-	tokenHash := HashToken(rawToken)
 	var cred AgentCredential
-	if err := db.Where("token_hash = ?", tokenHash).First(&cred).Error; err != nil {
+	if err := db.Where("token_hash = ?", hashToken(rawToken)).First(&cred).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrCredentialNotFound
 		}
@@ -127,28 +186,10 @@ func AuthenticateAgentToken(db *gorm.DB, rawToken string) (*Actor, error) {
 		return nil, ErrTokenRevoked
 	}
 
-	// Update LastUsedAt
+	// Best-effort: a failed last-used bookkeeping write must not turn a valid
+	// token into a rejected one.
 	now := time.Now().UTC()
-	db.Model(&cred).Update("last_used_at", now)
+	_ = db.Model(&cred).Update("last_used_at", now).Error
 
 	return GetActorByID(db, cred.ActorID)
-}
-
-func RecordExecLog(db *gorm.DB, log *ExecLog) error {
-	if log.ID == "" {
-		log.ID = uuid.New().String()
-	}
-	if log.CreatedAt.IsZero() {
-		log.CreatedAt = time.Now().UTC()
-	}
-	return db.Create(log).Error
-}
-
-func ListExecLogs(db *gorm.DB, agentID string, limit int) ([]ExecLog, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	var logs []ExecLog
-	err := db.Where("agent_id = ?", agentID).Order("created_at desc").Limit(limit).Find(&logs).Error
-	return logs, err
 }

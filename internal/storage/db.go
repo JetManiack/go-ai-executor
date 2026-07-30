@@ -1,49 +1,60 @@
+// Package storage holds this service's persistence layer: the GORM models and
+// the repository functions over them, behind a single Open(dsn) that selects
+// SQLite or Postgres from the DSN.
 package storage
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/glebarez/sqlite"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
+// Open opens a database at dsn — a postgres:// or postgresql:// scheme selects
+// the Postgres backend; anything else (a file path or ":memory:") selects
+// SQLite — applies backend-specific setup, and migrates the schema.
 func Open(dsn string) (*gorm.DB, error) {
-	var dialector gorm.Dialector
+	var db *gorm.DB
+	var err error
 
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		dialector = postgres.Open(dsn)
+	if IsPostgresDSN(dsn) {
+		db, err = openPostgres(dsn)
 	} else {
-		// SQLite (pure Go, CGO-free)
-		if dsn != ":memory:" {
-			dir := filepath.Dir(dsn)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return nil, fmt.Errorf("failed to create db directory %q: %w", dir, err)
-			}
-		}
-		dialector = sqlite.Open(dsn)
+		db, err = openSQLite(dsn)
 	}
-
-	db, err := gorm.Open(dialector, &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
-	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, err
 	}
 
-	if err := db.AutoMigrate(
-		&Actor{},
-		&AgentCredential{},
-		&UserIdentity{},
-		&Session{},
-		&ExecLog{},
-	); err != nil {
-		return nil, fmt.Errorf("failed to auto-migrate database: %w", err)
+	migrate := func() error {
+		if err := db.AutoMigrate(
+			&Actor{},
+			&AgentCredential{},
+			&UserIdentity{},
+			&Session{},
+			&SandboxBlock{},
+		); err != nil {
+			return fmt.Errorf("automigrate: %w", err)
+		}
+		return nil
+	}
+
+	// On Postgres, a second replica migrating the same schema concurrently
+	// (e.g. mid-RollingUpdate) can deadlock against this one — serialize with
+	// an advisory lock. SQLite has no concurrent-replica scenario to guard
+	// against.
+	if db.Dialector.Name() == "postgres" {
+		if err := withMigrationLock(db, migrate); err != nil {
+			return nil, err
+		}
+	} else if err := migrate(); err != nil {
+		return nil, err
 	}
 
 	return db, nil
+}
+
+// IsPostgresDSN reports whether dsn selects the Postgres backend.
+func IsPostgresDSN(dsn string) bool {
+	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://")
 }

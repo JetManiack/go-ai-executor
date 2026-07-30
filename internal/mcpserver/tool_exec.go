@@ -9,7 +9,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/JetManiack/go-ai-executor/internal/sandbox"
-	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 type ExecCommandInput struct {
@@ -70,21 +69,6 @@ func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecComm
 			Truncated:  res.Truncated,
 			Timestamp:  now,
 		})
-
-		if deps.DB != nil {
-			_ = storage.RecordExecLog(deps.DB, &storage.ExecLog{
-				ID:         execID,
-				AgentID:    actor.ID,
-				Command:    in.Command,
-				WorkDir:    in.WorkDir,
-				Stdout:     res.Stdout,
-				Stderr:     res.Stderr,
-				ExitCode:   res.ExitCode,
-				DurationMs: res.DurationMs,
-				Truncated:  res.Truncated,
-				CreatedAt:  now,
-			})
-		}
 
 		// A command that exits non-zero is a successful tool call reporting a
 		// failed command, so only a genuine execution failure (timeout, missing

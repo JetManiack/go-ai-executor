@@ -4,10 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/JetManiack/go-ai-executor/internal/humanauth"
@@ -105,16 +103,6 @@ func NewRouter(opts RouterOptions) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 	})
 
-	r.Get("/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
-		agentID := chi.URLParam(r, "id")
-		logs, err := storage.ListExecLogs(opts.DB, agentID, 100)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, logs)
-	})
-
 	// Server-Sent Events (SSE) Live Terminal Output Stream
 	r.Get("/agents/{id}/stream", func(w http.ResponseWriter, r *http.Request) {
 		agentID := chi.URLParam(r, "id")
@@ -154,61 +142,6 @@ func NewRouter(opts RouterOptions) http.Handler {
 				}
 			}
 		}
-	})
-
-	// Web UI manual command trigger
-	r.Post("/agents/{id}/exec", func(w http.ResponseWriter, r *http.Request) {
-		agentID := chi.URLParam(r, "id")
-		var req struct {
-			Command string `json:"command"`
-			WorkDir string `json:"work_dir"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Command == "" {
-			writeError(w, http.StatusBadRequest, "command is required")
-			return
-		}
-
-		sb, err := opts.Manager.GetSandbox(agentID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		res, err := sb.ExecCommand(r.Context(), req.Command, 30*time.Second, req.WorkDir)
-		now := time.Now().UTC()
-		logID := uuid.New().String()
-
-		event := sandbox.ExecEvent{
-			ID:         logID,
-			AgentID:    agentID,
-			Command:    req.Command,
-			WorkDir:    req.WorkDir,
-			Stdout:     res.Stdout,
-			Stderr:     res.Stderr,
-			ExitCode:   res.ExitCode,
-			DurationMs: res.DurationMs,
-			Truncated:  res.Truncated,
-			Timestamp:  now,
-		}
-
-		// Broadcast to live stream subscribers
-		opts.Manager.Broadcaster().Publish(event)
-
-		// Save to database
-		_ = storage.RecordExecLog(opts.DB, &storage.ExecLog{
-			ID:         logID,
-			AgentID:    agentID,
-			Command:    req.Command,
-			WorkDir:    req.WorkDir,
-			Stdout:     res.Stdout,
-			Stderr:     res.Stderr,
-			ExitCode:   res.ExitCode,
-			DurationMs: res.DurationMs,
-			Truncated:  res.Truncated,
-			CreatedAt:  now,
-		})
-
-		writeJSON(w, http.StatusOK, event)
 	})
 
 	return r
