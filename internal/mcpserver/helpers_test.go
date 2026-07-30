@@ -56,7 +56,7 @@ func newTestManager(t *testing.T) *sandbox.Manager {
 		DefaultTimeout: 5 * time.Second,
 		MaxOutputBytes: 64 << 10,
 		Shell:          "/bin/sh",
-		AllowedEnvs:    sandbox.DefaultConfig("").AllowedEnvs,
+		EnvPassthrough: sandbox.DefaultEnvPassthrough,
 	})
 	if err != nil {
 		t.Fatalf("sandbox.NewManager: %v", err)

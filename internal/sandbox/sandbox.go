@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,11 +36,18 @@ const chunkSize = 16 << 10
 const waitDelay = 2 * time.Second
 
 type Config struct {
-	RootDir           string
-	DefaultTimeout    time.Duration
-	MaxOutputBytes    int
-	Shell             string
-	AllowedEnvs       []string
+	RootDir        string
+	DefaultTimeout time.Duration
+	MaxOutputBytes int
+	Shell          string
+
+	// EnvPassthrough names variables inherited from the server's environment;
+	// ExtraEnv holds literal KEY=VALUE entries. Everything else is dropped — the
+	// server's environment is where this service's own database DSN and session
+	// key live, so a command must not simply inherit it.
+	EnvPassthrough []string
+	ExtraEnv       []string
+
 	StreamBufferBytes int
 }
 
@@ -85,12 +93,17 @@ type FileInfo struct {
 }
 
 type SandboxStatus struct {
-	RootDir        string   `json:"root_dir"`
-	DefaultTimeout string   `json:"default_timeout"`
-	MaxOutputBytes int      `json:"max_output_bytes"`
-	Shell          string   `json:"shell"`
-	AllowedEnvs    []string `json:"allowed_envs"`
-	RunningCommand int      `json:"running_commands"`
+	RootDir        string `json:"root_dir"`
+	DefaultTimeout string `json:"default_timeout"`
+	MaxOutputBytes int    `json:"max_output_bytes"`
+	Shell          string `json:"shell"`
+
+	// EnvNames lists the variable names a command is given, without their
+	// values: an agent needs to know whether PATH or a locale is set, and has no
+	// business being handed the contents through a status call.
+	EnvNames []string `json:"env_names"`
+
+	RunningCommand int `json:"running_commands"`
 }
 
 func DefaultConfig(rootDir string) Config {
@@ -103,11 +116,7 @@ func DefaultConfig(rootDir string) Config {
 		MaxOutputBytes:    512 << 10,
 		Shell:             "/bin/sh",
 		StreamBufferBytes: DefaultStreamBufferBytes,
-		AllowedEnvs: []string{
-			"PATH=/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin",
-			"LANG=C.UTF-8",
-			"LC_ALL=C.UTF-8",
-		},
+		EnvPassthrough:    slices.Clone(DefaultEnvPassthrough),
 	}
 }
 
@@ -145,6 +154,12 @@ func newSandbox(id string, cfg Config, bus *Broadcaster) (*Sandbox, error) {
 	}
 	if cfg.Shell == "" {
 		cfg.Shell = "/bin/sh"
+	}
+	if err := ValidateEnvPassthrough(cfg.EnvPassthrough); err != nil {
+		return nil, err
+	}
+	if cfg.EnvPassthrough == nil {
+		cfg.EnvPassthrough = slices.Clone(DefaultEnvPassthrough)
 	}
 	cfg.RootDir = absRoot
 
@@ -272,13 +287,9 @@ func (s *Sandbox) ExecCommand(ctx context.Context, command string, timeout time.
 	// so there is nothing to sanitize: what bounds it is the scrubbed
 	// environment, the working directory, the output cap, the timeout and the
 	// process group — not inspection of the command string.
-	// #nosec G204 -- see above
-	cmd := exec.CommandContext(execCtx, cfg.Shell, "-c", command) //nolint:gosec // deliberate: see the comment above
+	cmd := exec.CommandContext(execCtx, cfg.Shell, "-c", command)
 	cmd.Dir = targetWorkDir
-	cmd.Env = append(append([]string{}, cfg.AllowedEnvs...),
-		"HOME="+cfg.RootDir,
-		"PWD="+targetWorkDir,
-	)
+	cmd.Env = buildEnv(cfg, targetWorkDir)
 	setProcessGroup(cmd)
 	// Cancel the whole process group, not just the shell: this is what makes a
 	// timeout collect backgrounded children instead of orphaning them.
@@ -583,7 +594,7 @@ func (s *Sandbox) GetStatus() SandboxStatus {
 		DefaultTimeout: s.config.DefaultTimeout.String(),
 		MaxOutputBytes: s.config.MaxOutputBytes,
 		Shell:          s.config.Shell,
-		AllowedEnvs:    s.config.AllowedEnvs,
+		EnvNames:       envNames(buildEnv(s.config, s.config.RootDir)),
 		RunningCommand: len(s.running),
 	}
 }

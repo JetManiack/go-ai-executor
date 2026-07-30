@@ -77,6 +77,17 @@ func newRootCommand() *cli.Command {
 				Usage:   "shell binary commands are executed with",
 				Sources: cli.EnvVars("SHELL_PATH"),
 			},
+			&cli.StringSliceFlag{
+				Name:    "env-passthrough",
+				Value:   sandbox.DefaultEnvPassthrough,
+				Usage:   "environment variable names sandboxed commands inherit from this process; everything else is dropped, so an agent never sees this service's own credentials",
+				Sources: cli.EnvVars("ENV_PASSTHROUGH"),
+			},
+			&cli.StringSliceFlag{
+				Name:    "env",
+				Usage:   "extra KEY=VALUE entries to put in every sandboxed command's environment (repeatable) — this is where a token an agent's task genuinely needs belongs",
+				Sources: cli.EnvVars("SANDBOX_ENV"),
+			},
 			&cli.BoolFlag{
 				Name:    "auth-stub",
 				Usage:   "use a fixed, always-admin test identity instead of real Keycloak/OIDC auth — local development only, never set this in a real deployment",
@@ -126,13 +137,26 @@ func newRootCommand() *cli.Command {
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			passthrough := cmd.StringSlice("env-passthrough")
+			if err := sandbox.ValidateEnvPassthrough(passthrough); err != nil {
+				return err
+			}
+			// Not refused, only surfaced: an agent whose task is to call an API
+			// does need its token, and only the operator knows which variable
+			// that is. Saying so once at startup beats discovering it in an
+			// `env` an agent ran.
+			if suspicious := sandbox.SuspiciousEnvNames(passthrough); len(suspicious) > 0 {
+				slog.Warn("passing possibly-sensitive environment variables to sandboxed commands", "names", suspicious)
+			}
+
 			mgr, err := sandbox.NewManager(sandbox.Config{
 				RootDir:           cmd.String("sandbox-dir"),
 				DefaultTimeout:    cmd.Duration("default-timeout"),
 				MaxOutputBytes:    cmd.Int("max-output-bytes"),
 				Shell:             cmd.String("shell"),
 				StreamBufferBytes: cmd.Int("stream-buffer-bytes"),
-				AllowedEnvs:       sandbox.DefaultConfig("").AllowedEnvs,
+				EnvPassthrough:    passthrough,
+				ExtraEnv:          cmd.StringSlice("env"),
 			})
 			if err != nil {
 				return fmt.Errorf("initialize sandbox manager: %w", err)

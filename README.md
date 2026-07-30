@@ -65,17 +65,39 @@ things, not on inspecting the command:
   on the requested path cannot catch. A command's working directory cannot use
   `os.Root` (exec takes a path), so its symlink chain is resolved and checked
   explicitly.
-- **A scrubbed environment.** Commands see only `PATH`, `LANG`, `LC_ALL`, plus
-  `HOME` and `PWD` pointing inside the sandbox — not the server's environment,
-  which is where credentials live.
+- **An allowlisted environment.** Commands inherit only the variables named by
+  `--env-passthrough` (`PATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ` by default),
+  plus anything the operator adds with `--env`, plus `HOME` and `PWD` pointing
+  inside the sandbox. The rest of the server's environment is dropped, because
+  that is where this service's `DB_DSN`, `OIDC_CLIENT_SECRET` and
+  `SESSION_ENCRYPTION_KEY` live — those three cannot be passed through at all,
+  and the server refuses to start if they are named.
 - **Process groups.** Commands run in their own group and are torn down as a
   group, so a backgrounded child cannot outlive its timeout or the stop button.
 - **Bounded output.** A per-call cap on what a tool returns, and a bounded ring
   buffer for what the terminal retains.
 
-This is a jail, not a container: a command runs as the server's user with the
-server's network access. Run the whole thing in a container (see below) if that
-matters, and treat the sandbox root as untrusted data.
+### What `exec_command` is not
+
+The path confinement above covers the file tools. It does **not** confine
+`exec_command`, and cannot: that tool runs a command as the server's user, so it
+reaches every file that user reaches — `cd / && rm -rf .` included. Neither the
+shell nor the `-c` is what makes this possible; dropping them and exec'ing a
+binary directly would remove pipes and `&&` while leaving `rm -rf /` exactly as
+effective.
+
+For `exec_command` the sandbox root is a working directory, not a boundary. The
+boundary has to come from the deployment:
+
+- run the service in a container, as a non-root user, with only the sandbox
+  volume writable — this is what the shipped image and the `USER executor` line
+  are for;
+- give that container no more network access than the agents actually need;
+- treat the sandbox root as untrusted data, and never mount anything into it that
+  the agents should not have.
+
+`internal/sandbox/containment_test.go` asserts this boundary explicitly rather
+than leaving it to prose.
 
 ## Auth
 
@@ -116,6 +138,8 @@ Every flag has an environment variable equivalent.
 | `--default-timeout` | `DEFAULT_TIMEOUT` | `30s` | per-command timeout when the caller sets none |
 | `--max-output-bytes` | `MAX_OUTPUT_BYTES` | `524288` | cap on the output a tool call returns |
 | `--shell` | `SHELL_PATH` | `/bin/sh` | shell commands run under |
+| `--env-passthrough` | `ENV_PASSTHROUGH` | `PATH,LANG,LC_ALL,LC_CTYPE,TZ` | variable names commands inherit from the server |
+| `--env` | `SANDBOX_ENV` | — | extra `KEY=VALUE` entries for every command (repeatable) |
 | `--stream-buffer-bytes` | `STREAM_BUFFER_BYTES` | `262144` | terminal output retained per sandbox for replay |
 | `--auth-stub` | `AUTH_STUB` | `false` | fixed admin identity, development only |
 | `--oidc-issuer` | `OIDC_ISSUER` | — | Keycloak realm issuer URL |
