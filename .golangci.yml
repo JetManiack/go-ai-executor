@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  default: standard
+
+  settings:
+    errcheck:
+      # Closing a read HTTP body, an embedded file, or a pooled connection can
+      # only fail in ways the caller cannot act on — the resource is already
+      # being released, and there is no retry or fallback to reach for. Handling
+      # these individually means `_ =` on every defer, which reads as "checked"
+      # while asserting nothing; excluding them here says so once, out loud.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Conn).Close
+
+    staticcheck:
+      checks:
+        - all
+        # QF1008 wants db.Dialector.Name() shortened to db.Name() via the
+        # embedded field. It resolves to the same method, but "which name?" is
+        # exactly the question the reader has at that line — the backend's, not
+        # the model's — so the explicit selector stays.
+        - -QF1008
+
+  exclusions:
+    rules:
+      # Test helpers close bodies and connections constantly, always in defers
+      # where a failure would just mask the assertion that actually matters.
+      - path: _test\.go
+        linters:
+          - errcheck

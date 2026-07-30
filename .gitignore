@@ -1,0 +1,27 @@
+# Build artifacts
+/bin/
+
+# Runtime state: the default sqlite DSN (data/executor.db) and the default
+# sandbox root (./scratch) are both created on first run.
+/data/
+/scratch/
+
+# Generated frontend bundle — rebuilt by `make generate`.
+/internal/frontend/static/js/app.bundle.js
+
+# Vendored, checksum-verified at build time by `make generate`. Kept out of the
+# tree so the checksums in the Makefile are the single source of truth: a
+# committed copy would be trusted by go:embed without ever being verified.
+/internal/frontend/static/js/vendor/
+/internal/frontend/static/fonts/
+
+# Editors
+/.idea/
+/.vscode/
+*.swp
+.DS_Store
+
+# Local agent scratch state
+/.claude/
+/.remember/
+/.superpowers/

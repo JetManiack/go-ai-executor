@@ -1,0 +1,19 @@
+# The build stage runs `make generate`, which regenerates the bundle and
+# re-downloads the vendored assets — shipping the host's copies in the build
+# context would only mask a broken generate step.
+bin/
+data/
+scratch/
+internal/frontend/static/js/app.bundle.js
+internal/frontend/static/js/vendor/
+internal/frontend/static/fonts/
+
+.git/
+.github/
+.idea/
+.vscode/
+.claude/
+.remember/
+.superpowers/
+docs/
+.DS_Store
