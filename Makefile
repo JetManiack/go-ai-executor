@@ -1,8 +1,10 @@
 SHELL := /bin/bash
 
-BINARY_NAME := executor
-BIN_DIR     := bin
-CMD_DIR     := ./cmd/executor
+BINARY_NAME       := executor
+LOCAL_BINARY_NAME := executor-local
+BIN_DIR           := bin
+CMD_DIR           := ./cmd/executor
+LOCAL_CMD_DIR     := ./cmd/executor-local
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
@@ -19,13 +21,26 @@ help: ## Show this help message
 	awk 'BEGIN {FS = ":.*?## "}; /^[a-zA-Z0-9_\-]+:.*?## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
 
 .PHONY: build
-build: generate ## Build the binary into bin/executor (regenerates the frontend bundle first)
+build: build-server build-local ## Build both binaries into bin/
+
+.PHONY: build-server
+build-server: generate ## Build the multi-user HTTP server into bin/executor (regenerates the frontend bundle first)
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/$(BINARY_NAME) $(CMD_DIR)
+
+# No `generate` dependency: the local helper has no web UI, so nothing to bundle.
+.PHONY: build-local
+build-local: ## Build the local stdio helper into bin/executor-local (no frontend, no database)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/$(LOCAL_BINARY_NAME) $(LOCAL_CMD_DIR)
 
 .PHONY: run
 run: generate ## Run the server locally with stub auth (DB_DSN=data/executor.db, use ARGS="--flag=value" for extra flags)
 	AUTH_STUB=true DB_DSN="data/executor.db" go run $(CMD_DIR) $(ARGS)
+
+.PHONY: run-local
+run-local: ## Run the local stdio helper in this directory (it reads MCP frames on stdin, so a bare terminal will look idle)
+	go run $(LOCAL_CMD_DIR) $(ARGS)
 
 FRONTEND_VENDOR_DIR := internal/frontend/static/js/vendor
 FRONTEND_FONTS_DIR  := internal/frontend/static/fonts

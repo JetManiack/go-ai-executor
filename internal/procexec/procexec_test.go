@@ -1,4 +1,4 @@
-package sandbox
+package procexec
 
 import "testing"
 
@@ -37,7 +37,7 @@ func TestSplitCompleteRunes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			complete, carry := splitCompleteRunes([]byte(tt.in))
+			complete, carry := SplitCompleteRunes([]byte(tt.in))
 			if string(complete) != tt.wantComplete {
 				t.Errorf("complete = %q, want %q", complete, tt.wantComplete)
 			}
@@ -53,12 +53,12 @@ func TestTruncatedOutputDropsAPartialRune(t *testing.T) {
 	// mid-character. Left alone that puts invalid UTF-8 in the tool result, which
 	// JSON mangles and Postgres rejects outright. A cap that happens to land on a
 	// boundary keeps the whole character; see the case below.
-	buf := &limitedBuffer{limit: 3}
+	buf := NewCappedBuffer(3)
 	if _, err := buf.Write([]byte("a☃☃")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	if !buf.truncated {
+	if !buf.Truncated() {
 		t.Fatal("buffer is not marked truncated")
 	}
 	if got := buf.String(); got != "a" {
@@ -67,7 +67,7 @@ func TestTruncatedOutputDropsAPartialRune(t *testing.T) {
 }
 
 func TestUntruncatedOutputIsReturnedWhole(t *testing.T) {
-	buf := &limitedBuffer{limit: 1024}
+	buf := NewCappedBuffer(1024)
 	if _, err := buf.Write([]byte("a☃b")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -80,11 +80,11 @@ func TestTruncationOnARuneBoundaryKeepsTheCharacter(t *testing.T) {
 	// A cap that happens to fall exactly after a character must not drop it:
 	// trimming unconditionally would silently shorten every truncated result by
 	// one character.
-	buf := &limitedBuffer{limit: 4}
+	buf := NewCappedBuffer(4)
 	if _, err := buf.Write([]byte("a☃☃")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	if !buf.truncated {
+	if !buf.Truncated() {
 		t.Fatal("buffer is not marked truncated")
 	}
 	if got := buf.String(); got != "a☃" {

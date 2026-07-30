@@ -1,11 +1,17 @@
 # go-ai-executor
 
-An MCP server that gives each AI agent a jailed directory it can run programs and
-do file operations in, plus a web UI where a human watches those terminals live
-and can stop a sandbox that has gone wrong.
+Two binaries for two different situations.
 
-Agents authenticate to `/mcp` with a per-agent bearer token. Humans authenticate
-to the UI through Keycloak/OIDC, and only an administrator can stop a sandbox.
+**`executor`** — a multi-user MCP server over HTTP. Each agent gets a jailed
+directory it can run programs and do file operations in, and a web UI lets a human
+watch those terminals live and stop a sandbox that has gone wrong. Agents
+authenticate to `/mcp` with a per-agent bearer token; humans authenticate to the UI
+through Keycloak/OIDC, and only an administrator can stop a sandbox.
+
+**`executor-local`** — a single-user MCP server over stdin/stdout for a developer's
+own machine. It runs shell command lines in the directory it was started in, and
+that is all: no HTTP, no web UI, no database, no authentication, no sandbox. See
+[The local helper](#the-local-helper).
 
 ## What it does
 
@@ -153,7 +159,6 @@ Every flag has an environment variable equivalent.
 | `--listen-addr` | `LISTEN_ADDR` | `:8080` | HTTP listen address |
 | `--db-dsn` | `DB_DSN` | `data/executor.db` | SQLite path or `postgres://…` |
 | `--sandbox-dir` | `SANDBOX_DIR` | `./scratch` | root the per-agent sandboxes live under |
-| `--transport` | `TRANSPORT` | `http` | `http` (with the UI) or `stdio` |
 | `--default-timeout` | `DEFAULT_TIMEOUT` | `30s` | per-command timeout when the caller sets none |
 | `--max-output-bytes` | `MAX_OUTPUT_BYTES` | `524288` | cap on the output a tool call returns |
 | `--env-passthrough` | `ENV_PASSTHROUGH` | `PATH,LANG,LC_ALL,LC_CTYPE,TZ` | variable names commands inherit from the server |
@@ -217,15 +222,65 @@ Reconnect with `?after=<seq>` to resume. Output is retained per sandbox up to
 `gap` rather than a silent jump. A watcher that stops reading is disconnected
 rather than having its events dropped, so a reconnect reports the loss honestly.
 
-## stdio transport
+## The local helper
+
+`executor-local` exists because the server answers a different question. The server
+is multi-tenant: several agents share one process, so each needs a jailed
+directory, an allowlisted environment and an argument vector no shell reinterprets.
+On your own machine there is one user, and the agent acts with exactly your
+authority — the same authority it has if you paste the command into your terminal.
+Confinement there would buy nothing it could not trivially step around, so it is
+not pretended at.
 
 ```sh
-./bin/executor --transport=stdio --db-dsn=data/executor.db --sandbox-dir=./scratch
+make build-local
 ```
 
-For desktop MCP clients. There is no HTTP surface, no web UI and no token: every
-call is attributed to a single durable `stdio-local` agent, which gets its own
-sandbox and is subject to blocks like any other.
+Point an MCP client at the binary; it speaks MCP on stdin/stdout and writes nothing
+else to either stream.
+
+```json
+{
+  "mcpServers": {
+    "executor-local": {
+      "command": "/path/to/bin/executor-local",
+      "args": ["--dir", "/path/to/your/repo"]
+    }
+  }
+}
+```
+
+Two tools:
+
+| Tool | Purpose |
+|---|---|
+| `run_shell` | run a shell command line — pipes, redirection, globs and `&&` all work |
+| `get_status` | report the directory, shell, timeout and output cap in use, and that nothing is sandboxed |
+
+`run_shell` is named for what it is rather than mirroring the server's
+`exec_command`: that tool takes a program and an argument vector, this one takes a
+command line. One name with two schemas would mislead an agent that talks to both.
+
+| Flag | Env | Default | Purpose |
+|---|---|---|---|
+| `--dir` | `EXECUTOR_LOCAL_DIR` | the directory it was started in | working directory for commands |
+| `--shell` | `EXECUTOR_LOCAL_SHELL` | `$SHELL`, then `/bin/sh` | shell that runs the command lines |
+| `--timeout` | `EXECUTOR_LOCAL_TIMEOUT` | `2m` | default per-command timeout |
+| `--max-output-bytes` | `EXECUTOR_LOCAL_MAX_OUTPUT_BYTES` | `1048576` | per-stream output cap |
+
+What it keeps from the sandboxed path is the mechanics that are about correctness
+rather than containment: a timeout tears down the command's whole process tree, so
+a `make` that spawned workers does not leave them behind; output is bounded; and a
+multi-byte character is never cut in half.
+
+What it deliberately does not do: confine paths, filter the environment (a command
+sees yours, because that is what you would have given it), log anything, or serve
+anything over the network. `get_status` reports `"sandboxed": false` so an agent
+cannot mistake it for the server.
+
+The server binary has no stdio mode. It used to, attributing calls to a synthesized
+`stdio-local` agent; two stdio paths with different semantics — one sandboxed and
+audited, one not — is worse than one of each done properly.
 
 ## Deployment
 
@@ -245,6 +300,7 @@ actually requests.
 
 ```sh
 make            # list targets
+make build      # both binaries into bin/
 make generate   # bundle the frontend, vendor and checksum React + fonts
 make test       # go test ./...
 make test-race  # with the race detector
@@ -270,9 +326,13 @@ TEST_POSTGRES_DSN=postgres://executor:executor@localhost:5432/executor_test \
 ## Layout
 
 ```
-cmd/executor/            CLI, flag/env parsing, server wiring
-internal/mcpserver/      the MCP surface: one tool_*.go per tool, plus auth
-internal/sandbox/        the jail: exec, streaming, ring buffer, process groups
+cmd/executor/            server CLI: flag/env parsing, HTTP wiring
+cmd/executor-local/      local stdio helper CLI
+internal/mcpserver/      the server's MCP surface: one tool_*.go per tool, plus auth
+internal/sandbox/        the jail: exec, streaming, ring buffer, os.Root confinement
+internal/localexec/      the local helper's runner: $SHELL in $CWD, unconfined
+internal/localmcp/       the local helper's MCP surface: run_shell, get_status
+internal/procexec/       shared mechanics: process-group teardown, bounded output
 internal/storage/        GORM models, SQLite/Postgres backends, repositories
 internal/restapi/        REST API and the terminal WebSocket, mounted at /api
 internal/humanauth/      OIDC provider, sessions, crypto, stub auth
@@ -280,6 +340,11 @@ internal/health/         /livez, /readyz
 internal/frontend/       go:embed of the built SPA
 web/src/                 React SPA (hash routing, esbuild)
 ```
+
+`internal/procexec` exists so the two subtle parts have one implementation each: a
+group kill that converges on processes forked while the signal was being delivered,
+and output cut on a character boundary. Both binaries need them, and duplicating
+either would mean fixing it twice.
 
 Architecture and the reasoning behind it:
 [`docs/superpowers/specs/2026-07-30-executor-parity-design.md`](docs/superpowers/specs/2026-07-30-executor-parity-design.md).

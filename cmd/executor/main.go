@@ -53,12 +53,6 @@ func newRootCommand() *cli.Command {
 				Usage:   "root directory under which each agent gets its own jailed sandbox",
 				Sources: cli.EnvVars("SANDBOX_DIR"),
 			},
-			&cli.StringFlag{
-				Name:    "transport",
-				Value:   "http",
-				Usage:   "MCP transport: 'http' (with the web UI) or 'stdio'",
-				Sources: cli.EnvVars("TRANSPORT"),
-			},
 			&cli.DurationFlag{
 				Name:    "default-timeout",
 				Value:   30 * time.Second,
@@ -156,22 +150,6 @@ func newRootCommand() *cli.Command {
 			}
 
 			dsn := cmd.String("db-dsn")
-
-			if cmd.String("transport") == "stdio" {
-				// stdio has no HTTP surface, so no /readyz to report a degraded
-				// start through: a database it can't open is fatal here, not
-				// something to serve around.
-				db, err := storage.Open(dsn)
-				if err != nil {
-					return fmt.Errorf("open database: %w", err)
-				}
-				actor, err := storage.GetOrCreateStdioActor(db)
-				if err != nil {
-					return fmt.Errorf("provision stdio actor: %w", err)
-				}
-				slog.Info("serving MCP over stdio", "actor", actor.DisplayName, "version", version)
-				return mcpserver.ServeStdio(ctx, mcpserver.Deps{DB: db, Manager: mgr, Version: version}, actor)
-			}
 
 			db, err := storage.Open(dsn)
 			if err != nil {

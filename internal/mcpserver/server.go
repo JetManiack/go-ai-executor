@@ -4,14 +4,12 @@
 package mcpserver
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
 
 	"github.com/JetManiack/go-ai-executor/internal/sandbox"
-	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 // ServerName is the MCP implementation name advertised to clients.
@@ -82,14 +80,4 @@ func NewHTTPHandler(deps Deps) http.Handler {
 	server := NewServer(deps)
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
 	return RequireAgentToken(deps.DB, mcpHandler)
-}
-
-// ServeStdio runs the MCP server over stdin/stdout for desktop MCP clients.
-//
-// stdio carries no credentials, so the caller supplies the Actor every tool
-// call is attributed to. Without one, stdio would be the single path that
-// bypasses both per-agent sandbox isolation and block enforcement.
-func ServeStdio(ctx context.Context, deps Deps, actor *storage.Actor) error {
-	server := NewServer(deps)
-	return server.Run(withActor(ctx, actor), &mcp.StdioTransport{})
 }

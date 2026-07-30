@@ -117,24 +117,6 @@ func TestActorsWithActiveToken(t *testing.T) {
 	})
 }
 
-func TestGetOrCreateStdioActorIsStable(t *testing.T) {
-	runOnEachBackend(t, func(t *testing.T, db *gorm.DB) {
-		first, err := storage.GetOrCreateStdioActor(db)
-		if err != nil {
-			t.Fatalf("GetOrCreateStdioActor: %v", err)
-		}
-		second, err := storage.GetOrCreateStdioActor(db)
-		if err != nil {
-			t.Fatalf("GetOrCreateStdioActor (second call): %v", err)
-		}
-		// A fresh actor per start would give each restart its own sandbox
-		// directory, orphaning whatever the previous run left behind.
-		if first.ID != second.ID {
-			t.Errorf("stdio actor id changed between calls: %q then %q", first.ID, second.ID)
-		}
-	})
-}
-
 func TestGetOrCreateHumanActorUpdatesRole(t *testing.T) {
 	runOnEachBackend(t, func(t *testing.T, db *gorm.DB) {
 		first, err := storage.GetOrCreateHumanActor(db, "subject-1", "Ada", "viewer")

@@ -1,4 +1,4 @@
-package sandbox
+package procexec
 
 // Output is read in fixed-size chunks, so a multi-byte character routinely
 // straddles two reads. Publishing the halves as-is would put invalid UTF-8 into
@@ -26,9 +26,9 @@ func runeByteLen(b byte) int {
 	}
 }
 
-// splitCompleteRunes splits b after its last complete UTF-8 character, returning
+// SplitCompleteRunes splits b after its last complete UTF-8 character, returning
 // the complete prefix and any truncated character at the tail.
-func splitCompleteRunes(b []byte) (complete, carry []byte) {
+func SplitCompleteRunes(b []byte) (complete, carry []byte) {
 	// A character is at most 4 bytes, so only the last 4 can be incomplete.
 	start := max(len(b)-4, 0)
 
@@ -47,11 +47,11 @@ func splitCompleteRunes(b []byte) (complete, carry []byte) {
 	return b, nil
 }
 
-// trimIncompleteRune drops a truncated character from the end of b, for output
+// TrimIncompleteRune drops a truncated character from the end of b, for output
 // that was cut by a byte limit rather than by a chunk boundary. Postgres rejects
 // invalid UTF-8 outright and JSON silently mangles it; neither is worth the one
 // partial character.
-func trimIncompleteRune(b []byte) []byte {
-	complete, _ := splitCompleteRunes(b)
+func TrimIncompleteRune(b []byte) []byte {
+	complete, _ := SplitCompleteRunes(b)
 	return complete
 }

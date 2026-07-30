@@ -131,3 +131,28 @@ func TestUnreadableBlockStateFailsClosed(t *testing.T) {
 		t.Error("list_dir succeeded although block state could not be verified")
 	}
 }
+
+// TestTimeoutKeepsPartialOutput is the server's half of the same defect: the
+// SDK's typed-handler path only assembles structured output when the handler
+// returns no error, so returning the timeout to it would drop everything the
+// command had already printed.
+func TestTimeoutKeepsPartialOutput(t *testing.T) {
+	db := openTestDB(t)
+	_, token := mustAgentWithToken(t, db, "agent-1")
+	session := connectSession(t, newTestServer(t, testDeps(t, db)), token)
+
+	result := callTool(t, session, "exec_command", map[string]any{
+		"command":     "/bin/sh",
+		"args":        []string{"-c", "echo before-the-hang; sleep 30"},
+		"timeout_sec": 1,
+	})
+	if !result.IsError {
+		t.Fatal("a command that outran its timeout was reported as success")
+	}
+	if got := outputField(t, result, "stdout"); !strings.Contains(got, "before-the-hang") {
+		t.Errorf("stdout = %q, want the output produced before the timeout", got)
+	}
+	if text := contentText(result.Content); !strings.Contains(text, "before-the-hang") {
+		t.Errorf("content = %q, want the partial output alongside the reason", text)
+	}
+}

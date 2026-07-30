@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/JetManiack/go-ai-executor/internal/storage"
 )
 
 // runRoot runs the CLI with args and returns its error, bounded by a timeout so a
@@ -109,49 +107,5 @@ func TestSessionKeyMustBe32Bytes(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, tt.want)
 			}
 		})
-	}
-}
-
-// TestStdioTransportStartsAndProvisionsItsActor covers the transport with no HTTP
-// surface: it must open the database, provision the actor its tool calls are
-// attributed to, and start serving — rather than fail on the OIDC configuration
-// the HTTP path requires.
-//
-// Under `go test` stdin is /dev/null, so the transport reads EOF and Run returns
-// almost immediately; this asserts it got that far, not that it served anything.
-// Tool behaviour over stdio shares every code path with internal/mcpserver's
-// tests, which do drive real sessions.
-//
-// Startup and the actor check live in one test on purpose: stdin is process-wide,
-// so a second test running the stdio transport finds it already closed.
-func TestStdioTransportStartsAndProvisionsItsActor(t *testing.T) {
-	dsn := filepath.Join(t.TempDir(), "test.db")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err := newRootCommand().Run(ctx, []string{
-		"executor",
-		"--transport=stdio",
-		"--db-dsn=" + dsn,
-		"--sandbox-dir=" + t.TempDir(),
-	})
-	if err != nil && !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("stdio transport failed to start: %v", err)
-	}
-
-	db, err := storage.Open(dsn)
-	if err != nil {
-		t.Fatalf("reopen database: %v", err)
-	}
-	actor, err := storage.GetOrCreateStdioActor(db)
-	if err != nil {
-		t.Fatalf("GetOrCreateStdioActor: %v", err)
-	}
-	if actor.DisplayName != storage.StdioActorName {
-		t.Errorf("actor name = %q, want %q", actor.DisplayName, storage.StdioActorName)
-	}
-	if actor.Kind != storage.ActorKindAgent {
-		t.Errorf("actor kind = %q, want %q", actor.Kind, storage.ActorKindAgent)
 	}
 }

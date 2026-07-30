@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/JetManiack/go-ai-executor/internal/procexec"
 )
 
 var (
@@ -36,12 +38,6 @@ var (
 // event. Small enough that a watcher sees progress on a chatty command promptly,
 // large enough not to publish an event per line of a fast loop.
 const chunkSize = 16 << 10
-
-// waitDelay bounds how long Wait blocks after cancellation before giving up on
-// the output pipes. Killing the process group normally closes them, but a
-// grandchild that escaped into its own session can hold one open forever, and
-// without this the calling tool never returns.
-const waitDelay = 2 * time.Second
 
 type Config struct {
 	RootDir        string
@@ -321,16 +317,16 @@ func (s *Sandbox) ExecCommand(ctx context.Context, program string, args []string
 	cmd := exec.CommandContext(execCtx, resolved, args...) //nolint:gosec // deliberate: see the comment above
 	cmd.Dir = targetWorkDir
 	cmd.Env = env
-	setProcessGroup(cmd)
+	procexec.Configure(cmd)
 	// Cancel the whole process group, not just the shell: this is what makes a
 	// timeout collect backgrounded children instead of orphaning them.
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		return killProcessGroup(cmd.Process.Pid)
+		return procexec.KillGroup(cmd.Process.Pid)
 	}
-	cmd.WaitDelay = waitDelay
+	cmd.WaitDelay = procexec.WaitDelay
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil { //nolint:dupl // the stderr pipe below reads the same by necessity
@@ -356,8 +352,8 @@ func (s *Sandbox) ExecCommand(ctx context.Context, program string, args []string
 		WorkDir: workDir,
 	})
 
-	stdoutBuf := &limitedBuffer{limit: cfg.MaxOutputBytes}
-	stderrBuf := &limitedBuffer{limit: cfg.MaxOutputBytes}
+	stdoutBuf := procexec.NewCappedBuffer(cfg.MaxOutputBytes)
+	stderrBuf := procexec.NewCappedBuffer(cfg.MaxOutputBytes)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -368,7 +364,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, program string, args []string
 
 	waitErr := cmd.Wait()
 	durationMs := time.Since(started).Milliseconds()
-	truncated := stdoutBuf.truncated || stderrBuf.truncated
+	truncated := stdoutBuf.Truncated() || stderrBuf.Truncated()
 
 	result := ExecResult{
 		ExecID:     execID,
@@ -435,7 +431,7 @@ func (s *Sandbox) ExecCommand(ctx context.Context, program string, args []string
 // what the agent gets back in one tool result, while the live terminal is meant
 // to keep showing what is happening. Memory stays bounded by the ring buffer,
 // which evicts, rather than by refusing to read.
-func (s *Sandbox) pump(r io.Reader, kind EventKind, execID string, sink *limitedBuffer) {
+func (s *Sandbox) pump(r io.Reader, kind EventKind, execID string, sink *procexec.CappedBuffer) {
 	buf := make([]byte, chunkSize)
 	var carry []byte
 
@@ -450,7 +446,7 @@ func (s *Sandbox) pump(r io.Reader, kind EventKind, execID string, sink *limited
 			chunk = append(chunk, carry...)
 			chunk = append(chunk, buf[:n]...)
 
-			emit, tail := splitCompleteRunes(chunk)
+			emit, tail := procexec.SplitCompleteRunes(chunk)
 			carry = tail
 			if len(emit) > 0 {
 				s.publish(Event{Kind: kind, ExecID: execID, Data: string(emit)})
@@ -640,38 +636,4 @@ func (s *Sandbox) GetStatus() SandboxStatus {
 		EnvNames:       envNames(buildEnv(s.config, s.config.RootDir)),
 		RunningCommand: len(s.running),
 	}
-}
-
-// limitedBuffer accumulates up to limit bytes and reports whether anything was
-// dropped. Writes past the limit are reported as accepted so the producer keeps
-// running: the goal is to bound what is returned, not to break the command's
-// stdout with a short write.
-type limitedBuffer struct {
-	buf       []byte
-	limit     int
-	truncated bool
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	remaining := b.limit - len(b.buf)
-	if remaining <= 0 {
-		b.truncated = true
-		return len(p), nil
-	}
-	if len(p) > remaining {
-		b.buf = append(b.buf, p[:remaining]...)
-		b.truncated = true
-		return len(p), nil
-	}
-	b.buf = append(b.buf, p...)
-	return len(p), nil
-}
-
-// String returns the accumulated output, dropping a character the byte limit cut
-// in half.
-func (b *limitedBuffer) String() string {
-	if b.truncated {
-		return string(trimIncompleteRune(b.buf))
-	}
-	return string(b.buf)
 }

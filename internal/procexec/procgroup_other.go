@@ -1,6 +1,6 @@
 //go:build !unix
 
-package sandbox
+package procexec
 
 import (
 	"errors"
@@ -11,12 +11,12 @@ import (
 // address a command's whole process tree with.
 var errNoProcessGroups = errors.New("process groups are not supported on this platform")
 
-// setProcessGroup is a no-op off unix. The consequence is stated plainly rather
+// Configure is a no-op off unix. The consequence is stated plainly rather
 // than hidden: on such a platform a backgrounded grandchild outlives both the
 // timeout and the emergency stop, so the deployable target stays unix (the image
 // is Alpine).
-func setProcessGroup(cmd *exec.Cmd) {}
+func Configure(cmd *exec.Cmd) {}
 
-func killProcessGroup(pid int) error {
+func KillGroup(pid int) error {
 	return errNoProcessGroups
 }

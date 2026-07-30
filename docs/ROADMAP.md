@@ -60,6 +60,19 @@ commands that ran on replica A, and the ring buffer is per process. Making the
 stream cluster-wide needs a shared bus (Redis, NATS) or sticky routing by agent
 ID. Single-replica deployments are unaffected.
 
+## The local helper
+
+`executor-local` has one tool that runs things and one that describes itself. Two
+things it might grow:
+
+- **Streaming output.** A long build reports nothing until it finishes. The server
+  streams over a WebSocket; here the natural equivalent is MCP progress
+  notifications, which the client would have to render.
+- **File tools.** Deliberately absent: an unconfined `read_file` / `write_file`
+  duplicates what the calling client almost certainly already has, and an
+  unconfined `delete_file` is a footgun with no upside. Worth adding only if a
+  client turns up that has no file access of its own.
+
 ## Operational polish
 
 - **Metrics.** No Prometheus endpoint. Commands per agent, durations, exit codes,
