@@ -10,13 +10,21 @@ import (
 	"github.com/JetManiack/go-ai-executor/internal/localexec"
 )
 
-type RunShellInput struct {
-	Command    string `json:"command" jsonschema:"the shell command line to run, passed to the shell as written — pipes, redirection, globs and && all work"`
-	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"optional timeout in seconds; the helper's default applies when unset"`
-	WorkDir    string `json:"work_dir,omitempty" jsonschema:"optional working directory, relative to the helper's directory or absolute"`
+// ExecCommandInput is a superset of the server's input of the same name.
+//
+// With args set it means exactly what it means there — a program and its argument
+// vector, executed directly — so a caller written against the server works here
+// unchanged. With args omitted, command is a command line for $SHELL, which is
+// what makes this helper convenient locally: the agent already has the operator's
+// authority, so a shell buys pipes and redirection with nothing to protect.
+type ExecCommandInput struct {
+	Command    string   `json:"command" jsonschema:"a program to execute when args is set; otherwise a shell command line, where pipes, redirection, globs and && all work"`
+	Args       []string `json:"args,omitempty" jsonschema:"arguments passed verbatim to the program; when set, no shell is involved and shell syntax is NOT interpreted"`
+	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"optional timeout in seconds; the helper's default applies when unset"`
+	WorkDir    string   `json:"work_dir,omitempty" jsonschema:"optional working directory, relative to the helper's directory or absolute"`
 }
 
-type RunShellOutput struct {
+type ExecCommandOutput struct {
 	Stdout     string `json:"stdout" jsonschema:"everything the command wrote to stdout, up to the output cap"`
 	Stderr     string `json:"stderr" jsonschema:"everything the command wrote to stderr, up to the output cap"`
 	ExitCode   int    `json:"exit_code" jsonschema:"the command's exit status; -1 when it was killed by the timeout"`
@@ -24,10 +32,10 @@ type RunShellOutput struct {
 	Truncated  bool   `json:"truncated" jsonschema:"true when output exceeded the cap and was cut"`
 }
 
-func runShellHandler(runner *localexec.Runner) mcp.ToolHandlerFor[RunShellInput, RunShellOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in RunShellInput) (*mcp.CallToolResult, RunShellOutput, error) {
+func execCommandHandler(runner *localexec.Runner) mcp.ToolHandlerFor[ExecCommandInput, ExecCommandOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in ExecCommandInput) (*mcp.CallToolResult, ExecCommandOutput, error) {
 		if in.Command == "" {
-			return nil, RunShellOutput{}, errors.New("command cannot be empty")
+			return nil, ExecCommandOutput{}, errors.New("command cannot be empty")
 		}
 
 		var timeout time.Duration
@@ -35,8 +43,8 @@ func runShellHandler(runner *localexec.Runner) mcp.ToolHandlerFor[RunShellInput,
 			timeout = time.Duration(in.TimeoutSec) * time.Second
 		}
 
-		res, err := runner.Run(ctx, in.Command, timeout, in.WorkDir)
-		output := RunShellOutput{
+		res, err := runner.Run(ctx, in.Command, in.Args, timeout, in.WorkDir)
+		output := ExecCommandOutput{
 			Stdout:     res.Stdout,
 			Stderr:     res.Stderr,
 			ExitCode:   res.ExitCode,
@@ -44,8 +52,8 @@ func runShellHandler(runner *localexec.Runner) mcp.ToolHandlerFor[RunShellInput,
 			Truncated:  res.Truncated,
 		}
 
-		// A non-zero exit is the command reporting failure, which is an answer,
-		// not a failed tool call.
+		// A non-zero exit is the command reporting failure, which is an answer, not
+		// a failed tool call.
 		switch {
 		case errors.Is(err, localexec.ErrCommandTimeout):
 			// It ran and was cut short, so keep what it printed: for a build that

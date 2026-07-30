@@ -11,6 +11,7 @@ import (
 
 	"github.com/JetManiack/go-ai-executor/internal/localexec"
 	"github.com/JetManiack/go-ai-executor/internal/localmcp"
+	"github.com/JetManiack/go-ai-executor/internal/mcpserver"
 )
 
 // connectSession wires a client to the server over in-memory transports, so tool
@@ -85,26 +86,79 @@ func TestAdvertisesItsTools(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{"run_shell", "get_status"} {
+	for _, want := range []string{"exec_command", "read_file", "write_file", "list_dir", "delete_file", "get_sandbox_status"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("tools = %v, want it to contain %q", names, want)
 		}
 	}
+}
 
-	// The name has to differ from the server's exec_command: that tool takes a
-	// program and an argument vector, this one a command line, and an agent that
-	// talks to both must not see one name with two schemas.
-	if slices.Contains(names, "exec_command") {
-		t.Error("the local helper advertises exec_command, which is the server's differently-shaped tool")
+// TestToolNamesMatchTheServer is the test behind the shared vocabulary: the two
+// are never connected at the same time, so a client points at one or the other,
+// and a prompt written for either has to work against both. Comparing against the
+// server's actual registration rather than a copied list is what makes a rename on
+// one side fail here instead of surfacing as a tool an agent cannot find.
+func TestToolNamesMatchTheServer(t *testing.T) {
+	local := toolNames(t, localmcp.NewServer(mustRunner(t, t.TempDir()), "test"))
+
+	// Deps can be zero: listing tools never reaches a handler, so no database or
+	// sandbox manager is needed to ask the server what it advertises.
+	server := toolNames(t, mcpserver.NewServer(mcpserver.Deps{Version: "test"}))
+
+	slices.Sort(local)
+	slices.Sort(server)
+	if !slices.Equal(local, server) {
+		t.Errorf("tool names differ:\n  local:  %v\n  server: %v", local, server)
 	}
 }
 
-func TestRunShellReturnsOutput(t *testing.T) {
+// toolNames lists what a server advertises, over a real in-memory session.
+func toolNames(t *testing.T, server *mcp.Server) []string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	result, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	names := make([]string, 0, len(result.Tools))
+	for _, tool := range result.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func mustRunner(t *testing.T, dir string) *localexec.Runner {
+	t.Helper()
+	runner, err := localexec.New(localexec.Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("localexec.New: %v", err)
+	}
+	return runner
+}
+
+func TestExecCommandReturnsOutput(t *testing.T) {
 	session, _ := connectSession(t, t.TempDir())
 
-	result := callTool(t, session, "run_shell", map[string]any{"command": "echo hello && echo world"})
+	result := callTool(t, session, "exec_command", map[string]any{"command": "echo hello && echo world"})
 	if result.IsError {
-		t.Fatalf("run_shell failed: %v", result.Content)
+		t.Fatalf("exec_command failed: %v", result.Content)
 	}
 	if got := field(t, result, "stdout"); !strings.Contains(got.(string), "hello") ||
 		!strings.Contains(got.(string), "world") {
@@ -112,56 +166,61 @@ func TestRunShellReturnsOutput(t *testing.T) {
 	}
 }
 
-func TestRunShellReportsANonZeroExit(t *testing.T) {
+func TestExecCommandReportsANonZeroExit(t *testing.T) {
 	session, _ := connectSession(t, t.TempDir())
 
-	result := callTool(t, session, "run_shell", map[string]any{"command": "exit 4"})
+	result := callTool(t, session, "exec_command", map[string]any{"command": "exit 4"})
 	// A command that fails is an answer, not a failed tool call.
 	if result.IsError {
-		t.Fatalf("run_shell reported a tool error for a non-zero exit: %v", result.Content)
+		t.Fatalf("exec_command reported a tool error for a non-zero exit: %v", result.Content)
 	}
 	if got := field(t, result, "exit_code"); got != float64(4) {
 		t.Errorf("exit_code = %v, want 4", got)
 	}
 }
 
-func TestRunShellRejectsAnEmptyCommand(t *testing.T) {
+func TestExecCommandRejectsAnEmptyCommand(t *testing.T) {
 	session, _ := connectSession(t, t.TempDir())
 
-	result := callTool(t, session, "run_shell", map[string]any{"command": ""})
+	result := callTool(t, session, "exec_command", map[string]any{"command": ""})
 	if !result.IsError {
 		t.Error("an empty command was accepted")
 	}
 }
 
-func TestRunShellHonoursItsTimeout(t *testing.T) {
+func TestExecCommandHonoursItsTimeout(t *testing.T) {
 	session, _ := connectSession(t, t.TempDir())
 
-	result := callTool(t, session, "run_shell", map[string]any{"command": "sleep 30", "timeout_sec": 1})
+	result := callTool(t, session, "exec_command", map[string]any{"command": "sleep 30", "timeout_sec": 1})
 	if !result.IsError {
 		t.Error("a command that outran its timeout was reported as success")
 	}
 }
 
-func TestStatusDescribesTheEnvironmentAndSaysItIsNotSandboxed(t *testing.T) {
+func TestSandboxStatusSaysItIsNotSandboxed(t *testing.T) {
 	dir := t.TempDir()
 	session, runner := connectSession(t, dir)
 
-	result := callTool(t, session, "get_status", map[string]any{})
+	result := callTool(t, session, "get_sandbox_status", map[string]any{})
 	if result.IsError {
-		t.Fatalf("get_status failed: %v", result.Content)
+		t.Fatalf("get_sandbox_status failed: %v", result.Content)
 	}
 
-	if got := field(t, result, "dir"); got != runner.Dir() {
-		t.Errorf("dir = %v, want %q", got, runner.Dir())
+	status, ok := field(t, result, "status").(map[string]any)
+	if !ok {
+		t.Fatalf("status is %T, want a JSON object", field(t, result, "status"))
 	}
-	if got := field(t, result, "shell"); got != runner.Shell() {
-		t.Errorf("shell = %v, want %q", got, runner.Shell())
+	if status["root_dir"] != runner.Dir() {
+		t.Errorf("root_dir = %v, want %q", status["root_dir"], runner.Dir())
 	}
-	// Reported in the tool output, not only in the README: an agent that believes
-	// it is sandboxed will take risks it otherwise would not.
-	if got := field(t, result, "sandboxed"); got != false {
-		t.Errorf("sandboxed = %v, want false", got)
+	if status["shell"] != runner.Shell() {
+		t.Errorf("shell = %v, want %q", status["shell"], runner.Shell())
+	}
+	// Reported in the tool output, not only in the README: the tool is named
+	// get_sandbox_status to match the server, so an agent reading the name alone
+	// would assume a sandbox that is not there.
+	if status["sandboxed"] != false {
+		t.Errorf("sandboxed = %v, want false", status["sandboxed"])
 	}
 }
 
@@ -172,7 +231,7 @@ func TestStatusDescribesTheEnvironmentAndSaysItIsNotSandboxed(t *testing.T) {
 func TestTimeoutKeepsPartialOutput(t *testing.T) {
 	session, _ := connectSession(t, t.TempDir())
 
-	result := callTool(t, session, "run_shell", map[string]any{
+	result := callTool(t, session, "exec_command", map[string]any{
 		"command":     "echo before-the-hang; sleep 30",
 		"timeout_sec": 1,
 	})
@@ -195,5 +254,111 @@ func TestTimeoutKeepsPartialOutput(t *testing.T) {
 	}
 	if !strings.Contains(text.String(), "timed out") {
 		t.Errorf("content = %q, want it to say why the command was cut", text.String())
+	}
+}
+
+// TestFileToolsRoundTrip exercises the four file tools over a real session, since
+// their whole purpose is that a client can call them by the same names it uses
+// against the server.
+func TestFileToolsRoundTrip(t *testing.T) {
+	session, runner := connectSession(t, t.TempDir())
+
+	written := callTool(t, session, "write_file", map[string]any{
+		"path":    "nested/notes.txt",
+		"content": "hello",
+	})
+	if written.IsError {
+		t.Fatalf("write_file failed: %v", written.Content)
+	}
+	if got := field(t, written, "bytes"); got != float64(5) {
+		t.Errorf("bytes = %v, want 5", got)
+	}
+
+	read := callTool(t, session, "read_file", map[string]any{"path": "nested/notes.txt"})
+	if read.IsError {
+		t.Fatalf("read_file failed: %v", read.Content)
+	}
+	if got := field(t, read, "content"); got != "hello" {
+		t.Errorf("content = %v, want %q", got, "hello")
+	}
+	if got := field(t, read, "truncated"); got != false {
+		t.Errorf("truncated = %v, want false", got)
+	}
+
+	listed := callTool(t, session, "list_dir", map[string]any{"path": "nested"})
+	if listed.IsError {
+		t.Fatalf("list_dir failed: %v", listed.Content)
+	}
+	files, ok := field(t, listed, "files").([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("files = %v, want one entry", field(t, listed, "files"))
+	}
+
+	deleted := callTool(t, session, "delete_file", map[string]any{"path": "nested"})
+	if deleted.IsError {
+		t.Fatalf("delete_file failed: %v", deleted.Content)
+	}
+	if got := field(t, deleted, "was_directory"); got != true {
+		t.Errorf("was_directory = %v, want true", got)
+	}
+	if got := field(t, deleted, "existed"); got != true {
+		t.Errorf("existed = %v, want true", got)
+	}
+
+	if entries, err := runner.ListDir("."); err != nil || len(entries) != 0 {
+		t.Errorf("working directory = %+v (err %v), want empty after the delete", entries, err)
+	}
+}
+
+func TestListDirOnAnEmptyDirectoryReturnsAnArray(t *testing.T) {
+	session, _ := connectSession(t, t.TempDir())
+
+	listed := callTool(t, session, "list_dir", map[string]any{})
+	if listed.IsError {
+		t.Fatalf("list_dir failed: %v", listed.Content)
+	}
+	// [] rather than null: a client distinguishing "no entries" from "field
+	// absent" would otherwise see the latter.
+	files, ok := field(t, listed, "files").([]any)
+	if !ok {
+		t.Fatalf("files is %T, want an array", field(t, listed, "files"))
+	}
+	if len(files) != 0 {
+		t.Errorf("files = %v, want empty", files)
+	}
+}
+
+func TestFileToolsRejectAnEmptyPath(t *testing.T) {
+	session, _ := connectSession(t, t.TempDir())
+
+	for _, tool := range []string{"read_file", "write_file", "delete_file"} {
+		result := callTool(t, session, tool, map[string]any{"path": "", "content": "x"})
+		if !result.IsError {
+			t.Errorf("%s accepted an empty path", tool)
+		}
+	}
+}
+
+// TestExecCommandWithArgsSkipsTheShell is the client-visible half of the superset
+// contract: a call written against the server sends args and must get direct
+// execution, with shell syntax in an argument left as text.
+func TestExecCommandWithArgsSkipsTheShell(t *testing.T) {
+	session, _ := connectSession(t, t.TempDir())
+
+	result := callTool(t, session, "exec_command", map[string]any{
+		"command": "echo",
+		"args":    []string{"a && b > c"},
+	})
+	if result.IsError {
+		t.Fatalf("exec_command failed: %v", result.Content)
+	}
+	if got := field(t, result, "stdout").(string); !strings.Contains(got, "a && b > c") {
+		t.Errorf("stdout = %q, want the argument verbatim", got)
+	}
+
+	listed := callTool(t, session, "list_dir", map[string]any{})
+	files, _ := field(t, listed, "files").([]any)
+	if len(files) != 0 {
+		t.Errorf("files = %v, want none — the redirection in an argument was executed", files)
 	}
 }

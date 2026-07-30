@@ -250,16 +250,34 @@ else to either stream.
 }
 ```
 
-Two tools:
+The same six tool names the server uses, so a client config or a prompt written
+for one works against the other. The two are never connected at the same time —
+you point a client at one or the other — and a test compares the local
+registration against the server's so a rename on either side fails the build
+rather than surfacing as a tool an agent cannot find.
 
-| Tool | Purpose |
+| Tool | Local behaviour |
 |---|---|
-| `run_shell` | run a shell command line — pipes, redirection, globs and `&&` all work |
-| `get_status` | report the directory, shell, timeout and output cap in use, and that nothing is sandboxed |
+| `exec_command` | with `args`: the program is executed directly, as on the server. Without `args`: `command` is a shell command line, so pipes, redirection, globs and `&&` work |
+| `read_file` | read a file; long files are cut at the output cap and say so via `truncated` |
+| `write_file` | write a file, creating parent directories |
+| `list_dir` | list a directory, non-recursive |
+| `delete_file` | delete a file, or a directory and its subtree |
+| `get_sandbox_status` | report the directory, shell and limits — and `"sandboxed": false` |
 
-`run_shell` is named for what it is rather than mirroring the server's
-`exec_command`: that tool takes a program and an argument vector, this one takes a
-command line. One name with two schemas would mislead an agent that talks to both.
+`exec_command`'s input is a strict superset of the server's: send `args` and it
+behaves identically, omit them and you get a shell. That is the one place the
+contracts differ, and it differs by addition rather than by variation.
+
+Paths are relative to the helper's directory, or absolute, and are **not** confined
+to it — `read_file` will read `/etc/passwd` if asked. Two delete targets are
+refused, the filesystem root and the working directory itself, not as confinement
+but because both are almost certainly a mistake and the cost of being wrong is
+total.
+
+`get_sandbox_status` keeps the server's name even though there is no sandbox here,
+which is exactly why its output states `"sandboxed": false`: an agent reading the
+tool name alone would assume otherwise.
 
 | Flag | Env | Default | Purpose |
 |---|---|---|---|
@@ -275,8 +293,7 @@ multi-byte character is never cut in half.
 
 What it deliberately does not do: confine paths, filter the environment (a command
 sees yours, because that is what you would have given it), log anything, or serve
-anything over the network. `get_status` reports `"sandboxed": false` so an agent
-cannot mistake it for the server.
+anything over the network.
 
 The server binary has no stdio mode. It used to, attributing calls to a synthesized
 `stdio-local` agent; two stdio paths with different semantics — one sandboxed and

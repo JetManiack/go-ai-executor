@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,25 +81,28 @@ func TestSpeaksMCPOverStdio(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v (stderr: %s)", err, stderr.String())
 	}
-	var sawRunShell bool
+	names := make([]string, 0, len(tools.Tools))
 	for _, tool := range tools.Tools {
-		if tool.Name == "run_shell" {
-			sawRunShell = true
-		}
+		names = append(names, tool.Name)
 	}
-	if !sawRunShell {
-		t.Error("the helper does not advertise run_shell")
+	// The same names the server uses, so a client config written for one works
+	// against the other. internal/localmcp compares the two registrations
+	// directly; this checks the real binary ships them.
+	for _, want := range []string{"exec_command", "read_file", "write_file", "list_dir", "delete_file", "get_sandbox_status"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("tools = %v, want it to contain %q", names, want)
+		}
 	}
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "run_shell",
+		Name:      "exec_command",
 		Arguments: map[string]any{"command": "echo from-the-helper && pwd"},
 	})
 	if err != nil {
 		t.Fatalf("CallTool: %v (stderr: %s)", err, stderr.String())
 	}
 	if result.IsError {
-		t.Fatalf("run_shell failed: %v", result.Content)
+		t.Fatalf("exec_command failed: %v", result.Content)
 	}
 
 	fields, ok := result.StructuredContent.(map[string]any)

@@ -119,12 +119,25 @@ func (r *Runner) DefaultTimeout() time.Duration { return r.cfg.DefaultTimeout }
 // MaxOutputBytes returns the per-stream output cap.
 func (r *Runner) MaxOutputBytes() int { return r.cfg.MaxOutputBytes }
 
-// Run executes command through the shell and returns its output.
+// Run executes a command and returns its output.
+//
+// The argument vector selects how, and this is the one place the two binaries'
+// contracts differ deliberately rather than accidentally:
+//
+//   - args non-empty: program and arguments are executed directly, exactly as
+//     the server's exec_command does, so a caller written against the server
+//     behaves identically here.
+//   - args empty: command is a command line, handed to $SHELL -c. Pipes,
+//     redirection, globs and && work.
+//
+// Locally the agent already has the operator's authority, so the shell buys
+// convenience with nothing to protect; the direct form exists so the schema is a
+// superset of the server's rather than a variant of it.
 //
 // workDir, when set, is resolved relative to the configured directory; an
 // absolute path is taken as given. It is not checked for containment, because
 // there is nothing here to contain it to — see the package comment.
-func (r *Runner) Run(ctx context.Context, command string, timeout time.Duration, workDir string) (Result, error) {
+func (r *Runner) Run(ctx context.Context, command string, args []string, timeout time.Duration, workDir string) (Result, error) {
 	if command == "" {
 		return Result{}, errors.New("command cannot be empty")
 	}
@@ -132,23 +145,22 @@ func (r *Runner) Run(ctx context.Context, command string, timeout time.Duration,
 		timeout = r.cfg.DefaultTimeout
 	}
 
-	dir := r.cfg.Dir
-	if workDir != "" {
-		if filepath.IsAbs(workDir) {
-			dir = workDir
-		} else {
-			dir = filepath.Join(r.cfg.Dir, workDir)
-		}
-	}
+	dir := r.resolvePath(workDir)
 
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// The command line goes to the shell as one string, which is the interface
-	// this helper exists to provide: locally the agent already has the operator's
-	// authority, so pipes and redirection are convenience with nothing to protect.
-	// #nosec G204 -- see above and the package comment
-	cmd := exec.CommandContext(execCtx, r.cfg.Shell, "-c", command) //nolint:gosec // deliberate: see the comment above
+	// Either form runs a caller-supplied command, which is what this helper is for;
+	// the shell form additionally lets the caller write a command line. Nothing
+	// here is sanitized because nothing here is confined — see the package comment.
+	var cmd *exec.Cmd
+	if len(args) > 0 {
+		// #nosec G204 -- deliberate: executing the caller's program is the contract
+		cmd = exec.CommandContext(execCtx, command, args...) //nolint:gosec // deliberate: see above
+	} else {
+		// #nosec G204 -- deliberate: handing the caller's command line to their shell is the contract
+		cmd = exec.CommandContext(execCtx, r.cfg.Shell, "-c", command) //nolint:gosec // deliberate: see above
+	}
 	cmd.Dir = dir
 
 	// The operator's full environment, unlike the server's allowlist: this process

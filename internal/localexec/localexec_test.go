@@ -25,7 +25,7 @@ func TestRunsInTheConfiguredDirectory(t *testing.T) {
 	dir := t.TempDir()
 	runner := newRunner(t, localexec.Config{Dir: dir})
 
-	res, err := runner.Run(context.Background(), "pwd", 10*time.Second, "")
+	res, err := runner.Run(context.Background(), "pwd", nil, 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestShellFeaturesWork(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res, err := runner.Run(context.Background(), tt.command, 10*time.Second, "")
+			res, err := runner.Run(context.Background(), tt.command, nil, 10*time.Second, "")
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -112,7 +112,7 @@ func TestUsesTheConfiguredShell(t *testing.T) {
 	if runner.Shell() != fakeShell {
 		t.Fatalf("Shell() = %q, want %q", runner.Shell(), fakeShell)
 	}
-	if _, err := runner.Run(context.Background(), "echo hi", 10*time.Second, ""); err != nil {
+	if _, err := runner.Run(context.Background(), "echo hi", nil, 10*time.Second, ""); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestInheritsTheOperatorEnvironment(t *testing.T) {
 	t.Setenv("MY_LOCAL_TOOL_CONFIG", "visible-to-the-command")
 	runner := newRunner(t, localexec.Config{Dir: t.TempDir()})
 
-	res, err := runner.Run(context.Background(), "echo $MY_LOCAL_TOOL_CONFIG", 10*time.Second, "")
+	res, err := runner.Run(context.Background(), "echo $MY_LOCAL_TOOL_CONFIG", nil, 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestInheritsTheOperatorEnvironment(t *testing.T) {
 func TestNonZeroExitIsReportedNotAnError(t *testing.T) {
 	runner := newRunner(t, localexec.Config{Dir: t.TempDir()})
 
-	res, err := runner.Run(context.Background(), "echo out; echo err 1>&2; exit 7", 10*time.Second, "")
+	res, err := runner.Run(context.Background(), "echo out; echo err 1>&2; exit 7", nil, 10*time.Second, "")
 	if err != nil {
 		t.Fatalf("Run returned an error for a non-zero exit: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestNonZeroExitIsReportedNotAnError(t *testing.T) {
 func TestTimeoutIsReported(t *testing.T) {
 	runner := newRunner(t, localexec.Config{Dir: t.TempDir()})
 
-	res, err := runner.Run(context.Background(), "sleep 30", 300*time.Millisecond, "")
+	res, err := runner.Run(context.Background(), "sleep 30", nil, 300*time.Millisecond, "")
 	if !errors.Is(err, localexec.ErrCommandTimeout) {
 		t.Fatalf("error = %v, want ErrCommandTimeout", err)
 	}
@@ -192,7 +192,7 @@ func TestTimeoutIsReported(t *testing.T) {
 func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 	runner := newRunner(t, localexec.Config{Dir: t.TempDir()})
 
-	res, err := runner.Run(context.Background(), "sleep 60 & echo $!; sleep 60", 500*time.Millisecond, "")
+	res, err := runner.Run(context.Background(), "sleep 60 & echo $!; sleep 60", nil, 500*time.Millisecond, "")
 	if !errors.Is(err, localexec.ErrCommandTimeout) {
 		t.Fatalf("error = %v, want ErrCommandTimeout", err)
 	}
@@ -206,7 +206,7 @@ func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 	check := newRunner(t, localexec.Config{Dir: t.TempDir()})
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		probe, probeErr := check.Run(context.Background(), "kill -0 "+pid+" 2>/dev/null; echo $?", 5*time.Second, "")
+		probe, probeErr := check.Run(context.Background(), "kill -0 "+pid+" 2>/dev/null; echo $?", nil, 5*time.Second, "")
 		if probeErr != nil {
 			t.Fatalf("probe: %v", probeErr)
 		}
@@ -221,7 +221,7 @@ func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 func TestOutputIsCapped(t *testing.T) {
 	runner := newRunner(t, localexec.Config{Dir: t.TempDir(), MaxOutputBytes: 512})
 
-	res, err := runner.Run(context.Background(), "for i in $(seq 1 5000); do echo line-$i; done", 30*time.Second, "")
+	res, err := runner.Run(context.Background(), "for i in $(seq 1 5000); do echo line-$i; done", nil, 30*time.Second, "")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestWorkDirIsRelativeToTheConfiguredDirectory(t *testing.T) {
 	}
 	runner := newRunner(t, localexec.Config{Dir: dir})
 
-	res, err := runner.Run(context.Background(), "pwd", 10*time.Second, "sub")
+	res, err := runner.Run(context.Background(), "pwd", nil, 10*time.Second, "sub")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestWorkDirIsNotConfined(t *testing.T) {
 	// Deliberately allowed: this helper confines nothing, because the agent
 	// already has the operator's authority. Refusing here would be a gesture, not
 	// a boundary — the same command could `cd` itself.
-	res, err := runner.Run(context.Background(), "pwd", 10*time.Second, "/")
+	res, err := runner.Run(context.Background(), "pwd", nil, 10*time.Second, "/")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestWorkDirIsNotConfined(t *testing.T) {
 func TestRejectsAnEmptyCommand(t *testing.T) {
 	runner := newRunner(t, localexec.Config{Dir: t.TempDir()})
 
-	if _, err := runner.Run(context.Background(), "", 10*time.Second, ""); err == nil {
+	if _, err := runner.Run(context.Background(), "", nil, 10*time.Second, ""); err == nil {
 		t.Error("an empty command was accepted")
 	}
 }

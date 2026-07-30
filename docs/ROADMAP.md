@@ -62,16 +62,20 @@ ID. Single-replica deployments are unaffected.
 
 ## The local helper
 
-`executor-local` has one tool that runs things and one that describes itself. Two
-things it might grow:
-
 - **Streaming output.** A long build reports nothing until it finishes. The server
   streams over a WebSocket; here the natural equivalent is MCP progress
   notifications, which the client would have to render.
-- **File tools.** Deliberately absent: an unconfined `read_file` / `write_file`
-  duplicates what the calling client almost certainly already has, and an
-  unconfined `delete_file` is a footgun with no upside. Worth adding only if a
-  client turns up that has no file access of its own.
+- **A read cap that is not the output cap.** `read_file` is bounded by
+  `--max-output-bytes`, which is really about command output. A source file a
+  little over the cap comes back truncated for no good reason; a separate, larger
+  `--max-read-bytes` would fit both uses better.
+
+## The server's `read_file` is unbounded
+
+The server's `read_file` returns a file whole, however large — an agent asking for
+a multi-gigabyte file balloons the process and the MCP response. The local helper
+caps reads and reports `truncated`; the server should do the same, which means a
+new flag and a new output field on a tool clients already use.
 
 ## Operational polish
 
