@@ -63,6 +63,19 @@ func audited[In, Out any](
 
 		record.DurationMs = time.Since(began).Milliseconds()
 		record.Outcome = storage.AuditOutcomeOK
+		// A handler that decided something the error does not carry says so here.
+		// A command cut short by its timeout returns no error — the tool call
+		// succeeded in reporting it — so without this the journal records the one
+		// word that hides a kill the service performed.
+		if reported, ok := any(out).(interface{ auditOutcome() string }); ok {
+			if outcome := reported.auditOutcome(); outcome != "" {
+				record.Outcome = outcome
+			}
+		}
+		if coded, ok := any(out).(interface{ auditExitCode() int }); ok {
+			code := coded.auditExitCode()
+			record.ExitCode = &code
+		}
 		switch {
 		case callErr != nil && errors.Is(callErr, ErrSandboxBlocked):
 			// An administrator's decision is not a failure, and a journal that
@@ -99,6 +112,8 @@ func audited[In, Out any](
 // a journal entry with its output is by actor and time until the tool surfaces
 // the id it already has internally.
 
-func (o ExecCommandOutput) auditBytes() int { return len(o.Stdout) + len(o.Stderr) }
-func (o ReadFileOutput) auditBytes() int    { return len(o.Content) }
-func (o WriteFileOutput) auditBytes() int   { return o.Bytes }
+func (o ExecCommandOutput) auditBytes() int      { return len(o.Stdout) + len(o.Stderr) }
+func (o ExecCommandOutput) auditOutcome() string { return o.outcome }
+func (o ExecCommandOutput) auditExitCode() int   { return o.ExitCode }
+func (o ReadFileOutput) auditBytes() int         { return len(o.Content) }
+func (o WriteFileOutput) auditBytes() int        { return o.Bytes }

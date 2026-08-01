@@ -158,6 +158,11 @@ type AuditEvent struct {
 	// retained.
 	ExecID string `gorm:"type:char(36)" json:"exec_id,omitempty"`
 
+	// ExitCode is what the command returned, on the finished row of an exec.
+	// Nullable because most actions do not have one, and a zero would read as
+	// success for every file operation ever recorded.
+	ExitCode *int `json:"exit_code,omitempty"`
+
 	// Outcome and Error are set on the finished row only.
 	Outcome    string `gorm:"type:varchar(10)" json:"outcome,omitempty"`
 	Error      string `gorm:"type:text" json:"error,omitempty"`
@@ -177,4 +182,12 @@ const (
 	AuditOutcomeOK      = "ok"
 	AuditOutcomeError   = "error"
 	AuditOutcomeBlocked = "blocked"
+
+	// AuditOutcomeTimeout and AuditOutcomeStopped are commands the service cut
+	// short rather than commands that failed. They were filed as "ok" until a
+	// deployment review pointed out what that costs: a timeout kill is an action
+	// the service took against an agent, this journal is the only record of it,
+	// and "ok" is the one word that hides it.
+	AuditOutcomeTimeout = "timeout"
+	AuditOutcomeStopped = "stopped"
 )

@@ -3,6 +3,16 @@
 Ordered roughly by how much each one is missed in practice. Nothing here is
 committed to a date.
 
+## The capability bounding set is inherited by agents
+
+An agent's command runs with `CapPrm=CapEff=0`, but `CapBnd` still shows the four
+capabilities the worker holds. Inert in practice: `NoNewPrivs=1` means a setuid or
+file-capability binary cannot raise anything at exec, and the image has none
+anyway. Clearing it needs `PR_CAPBSET_DROP`, which needs `CAP_SETPCAP` — so the
+tidy-up costs a fifth capability in the pod spec to remove a risk that the fourth
+one being unusable already covers. Worth revisiting only if something else brings
+`CAP_SETPCAP` along.
+
 ## Reading the audit trail
 
 Every tool call now writes two journal rows — one when it is attempted, one when

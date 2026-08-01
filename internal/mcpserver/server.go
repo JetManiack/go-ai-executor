@@ -5,8 +5,8 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
@@ -57,7 +57,11 @@ func RegisterTools(server *mcp.Server, deps Deps) {
 		Name:        "exec_command",
 		Description: "Execute a shell command inside the sandbox directory with timeout and environment isolation",
 	}, audited(deps, "exec_command", func(in ExecCommandInput) string {
-		return strings.TrimSpace(in.Command + " " + strings.Join(in.Args, " "))
+		// Quoted as a vector rather than joined into a line. exec_command takes an
+		// argument vector precisely so no shell reinterprets it, and flattening it
+		// for the journal put that back: ["sh" "-c" "a & b"] read back as a shell
+		// line means something else entirely.
+		return fmt.Sprintf("%q", append([]string{in.Command}, in.Args...))
 	}, execCommandHandler(deps)))
 
 	mcp.AddTool(server, &mcp.Tool{

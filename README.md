@@ -95,6 +95,14 @@ worker never sees a token or an actor, only "run this in your sandbox".
 The worker dials out, so it needs no Service, no ingress and no discovery. Each
 one serves many agents, so the pool scales without anything above it knowing.
 
+**One worker per sandbox volume.** Not a scaling hint: an agent's user id *is*
+its directory's owner, and allocation is "lowest free id in the range" — a read
+followed by a create, which is not atomic across processes. Two workers sharing a
+volume can hand two agents the same id, and nothing fails: the isolation is simply
+not there. `ReadWriteOnce` does not prevent it either, since two pods on one node
+can mount the same claim. A second pool means a second deployment with its own
+volume, not a second replica.
+
 **Routing is sticky per agent.** A sandbox is a directory on one worker's disk, so
 `write_file` and the `read_file` after it have to reach the same worker. The server
 pins an agent to a connection on first use and keeps it there for the life of that
@@ -142,6 +150,13 @@ accepting all of them, so a missing flag is a pool that cannot execute anything
 rather than an open execution service.
 
 ## What is in a sandbox
+
+The worker is not PID 1 in its container — `tini` is, and it is there to reap
+orphans. A backgrounded process whose parent is killed reparents to PID 1, and a
+PID 1 that never calls `wait()` accumulates a zombie for each one. An in-process
+reaper would race the `wait()` that `os/exec` already does for every command,
+turning a finished command into "no child processes"; with an init above the
+worker there is no race, because only genuine orphans get that far.
 
 The image carries the tools an agent is likely to reach for: **python3** with
 `venv` and `pip`, **git**, **openssh-client**, **curl**, **jq**, **ripgrep**,
@@ -327,7 +342,7 @@ process that holds the sandboxes.
 |---|---|---|---|
 | `--server-url` | `SERVER_URL` | — | the server's base URL; `http(s)://` and `ws(s)://` both accepted |
 | `--worker-token` | `WORKER_TOKEN` | — | shared secret presented to the server; must match its `--worker-token` |
-| `--worker-token-file` | `WORKER_TOKEN_FILE` | — | read that secret from a file instead, keeping it out of `/proc/<pid>/environ` (preferred) |
+| `--worker-token-file` | `WORKER_TOKEN_FILE` | — | read that secret from a file instead, keeping it out of `/proc/<pid>/environ` (preferred). **Worker only** — the server has no file variant, because no agent code runs in its pod. Setting it there is silently ignored, and the server then has no token: it refuses every worker, and the symptom is "no execution worker is connected" rather than anything naming a token |
 | `--worker-id` | `WORKER_ID`, `HOSTNAME` | the hostname | name reported to the server, so in a pod it is the pod name |
 | `--sandbox-dir` | `SANDBOX_DIR` | `/sandboxes` | root the per-agent sandboxes live under; mount an `emptyDir` here |
 | `--default-timeout` | `DEFAULT_TIMEOUT` | `30s` | per-command timeout when the caller sets none |

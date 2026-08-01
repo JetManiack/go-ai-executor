@@ -49,13 +49,26 @@ FROM debian:bookworm-slim
 # calls to Keycloak, and without the trust store the server refuses to start with
 # an opaque x509 error. Agents also fetch over https constantly.
 #
+# tini is here for one reason: the worker would otherwise be PID 1, and a PID 1
+# that does not wait() leaks a zombie for every orphan reparented to it. An agent
+# running `npm run dev &` and then hitting a timeout leaves two — the process group
+# is killed correctly, but nobody collects the corpses, and nothing reaps them
+# lazily either. Measured on a real deployment, still there minutes later.
+#
+# An in-process reaper was the alternative and is worse here: wait4(-1) races the
+# wait() that os/exec already does for every tracked child, and losing that race
+# turns a finished command into "waitid: no child processes". With tini as PID 1
+# the worker keeps its own children and only genuine orphans reparent past it, so
+# there is no race to lose. It also forwards SIGTERM, which the graceful shutdown
+# depends on.
+#
 # Deliberately absent: a compiler toolchain. build-essential is most of a
 # quarter-gigabyte, and with glibc wheels the common cases do not need it. Add it
 # here if your agents' tasks turn out to.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-        ca-certificates tzdata \
+        ca-certificates tzdata tini \
         python3 python3-venv python3-pip \
         git openssh-client curl \
         jq ripgrep less unzip xz-utils procps; \
@@ -109,5 +122,5 @@ RUN mkdir -p /app/data && chown -R executor:executor /app
 RUN mkdir -p /sandboxes && chmod 0755 /sandboxes
 USER 65532:65532
 EXPOSE 8080
-ENTRYPOINT ["./docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "./docker-entrypoint.sh"]
 CMD ["executor"]

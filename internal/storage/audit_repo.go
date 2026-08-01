@@ -27,6 +27,7 @@ type AuditRecord struct {
 	Error      string
 	DurationMs int64
 	Bytes      int
+	ExitCode   *int
 }
 
 // AppendAuditStarted writes the row that says an action was attempted, and returns the
@@ -59,6 +60,7 @@ func appendAudit(db *gorm.DB, rec AuditRecord, phase AuditPhase) error {
 		Error:      truncateTarget(rec.Error),
 		DurationMs: rec.DurationMs,
 		Bytes:      rec.Bytes,
+		ExitCode:   rec.ExitCode,
 	}
 	if rec.Actor != nil {
 		event.ActorID = rec.Actor.ID

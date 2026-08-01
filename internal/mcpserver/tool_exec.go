@@ -7,6 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/storage"
 	"github.com/JetManiack/go-ai-executor/internal/workerproto"
 )
 
@@ -28,6 +29,16 @@ type ExecCommandOutput struct {
 	ExitCode   int    `json:"exit_code" jsonschema:"the command's exit status; -1 when it was killed by a timeout or stopped by an administrator"`
 	DurationMs int64  `json:"duration_ms" jsonschema:"wall-clock execution time in milliseconds"`
 	Truncated  bool   `json:"truncated" jsonschema:"true when output exceeded the server's cap and was cut"`
+
+	// outcome is how this handler tells the journal what it decided, and it is
+	// unexported because it is not part of the tool's contract — an agent learns
+	// the same thing from the error text it already gets.
+	//
+	// Without it the journal has to re-derive the answer from a message, or get it
+	// wrong: a timed-out command returns no error from this handler, deliberately,
+	// because the tool call succeeded in reporting a command that was cut short.
+	// The journal filed that as "ok" until a deployment review caught it.
+	outcome string
 }
 
 func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecCommandOutput] {
@@ -59,8 +70,12 @@ func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecComm
 		// failed command, so only a genuine execution failure becomes a tool
 		// error.
 		switch {
-		case errors.Is(execErr, sandbox.ErrCommandTimeout), errors.Is(execErr, sandbox.ErrCommandStopped):
+		case errors.Is(execErr, sandbox.ErrCommandTimeout):
 			// The command ran, so whatever it printed first is worth keeping.
+			output.outcome = storage.AuditOutcomeTimeout
+			return cutShortResult(execErr, output.Stdout, output.Stderr), output, nil
+		case errors.Is(execErr, sandbox.ErrCommandStopped):
+			output.outcome = storage.AuditOutcomeStopped
 			return cutShortResult(execErr, output.Stdout, output.Stderr), output, nil
 		case execErr != nil:
 			// It never ran — a missing program, an invalid working directory —
