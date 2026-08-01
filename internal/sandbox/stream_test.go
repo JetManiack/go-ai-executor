@@ -168,14 +168,22 @@ func TestStreamedChunksReassembleToTheReturnedOutput(t *testing.T) {
 	_, sub := bus.Subscribe(sb.ID(), 0)
 	defer bus.Unsubscribe(sb.ID(), sub)
 
-	// More than one chunk's worth, so reassembly is actually exercised.
+	// seq rather than a shell loop, and this is about the shape of the writes
+	// rather than about the bytes. A shell printing lines flushes on every newline,
+	// so 48KB arrived as two thousand events of about twenty bytes each — past the
+	// two hundred and fifty six a watcher may fall behind by, at which point the
+	// broadcaster disconnects it by design and this test was comparing a prefix.
+	// A program with ordinary stdio buffering delivers the same bytes in a handful
+	// of writes, and 128KB still crosses the 16KB read boundary many times.
 	collected := collectAsync(sub)
-	res, err := sb.ExecCommand(context.Background(), shellProgram, shellScript("for i in $(seq 1 5000); do echo line-$i; done"), 30*time.Second, "")
+	res, err := sb.ExecCommand(context.Background(), "seq", []string{"1", "20000"}, 30*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
 
 	events := awaitEvents(t, collected, 30*time.Second)
+	assertKeptUp(t, sub)
+
 	var streamed strings.Builder
 	for _, e := range events {
 		if e.Kind == stream.EventStdout {
@@ -201,13 +209,18 @@ func TestMultiByteOutputSurvivesChunkBoundaries(t *testing.T) {
 	// mid-character.
 	const repeats = 20000
 	collected := collectAsync(sub)
+	// One printf writing the lot, so the reads that split runes are the sandbox's
+	// 16KB reads rather than twenty thousand three-byte writes. 16384 is not a
+	// multiple of three, so boundaries still land mid-character.
 	res, err := sb.ExecCommand(context.Background(), shellProgram,
-		shellScript("for i in $(seq 1 "+itoa(repeats)+"); do printf '☃'; done"), 60*time.Second, "")
+		shellScript(`printf '☃%.0s' $(seq 1 `+itoa(repeats)+`)`), 60*time.Second, "")
 	if err != nil {
 		t.Fatalf("ExecCommand: %v", err)
 	}
 
 	events := awaitEvents(t, collected, 60*time.Second)
+	assertKeptUp(t, sub)
+
 	var streamed strings.Builder
 	for _, e := range events {
 		if e.Kind == stream.EventStdout {
@@ -292,5 +305,22 @@ func TestTruncationBoundsTheReturnedOutputOnly(t *testing.T) {
 	}
 	if streamed <= cfg.MaxOutputBytes {
 		t.Errorf("streamed %d bytes, want more than the %d-byte result cap", streamed, cfg.MaxOutputBytes)
+	}
+}
+
+// assertKeptUp fails if the watcher was disconnected for falling behind.
+//
+// Without it, a lagging subscription and genuinely lost output look identical:
+// collectAsync stops when the channel closes, whichever reason closed it, and the
+// comparison that follows then reports "streamed output differs" about a prefix.
+// That sent a CI failure looking at the streaming code when the cause was a test
+// publishing thirteen thousand events through a queue of two hundred and fifty six.
+func assertKeptUp(t *testing.T, sub *stream.Subscription) {
+	t.Helper()
+
+	if sub.Lagged() {
+		t.Fatal("the watcher was disconnected for falling behind, so what it collected is a prefix " +
+			"rather than the whole stream — this test cannot tell that apart from lost output, " +
+			"so it says so instead of comparing")
 	}
 }

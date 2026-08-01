@@ -162,11 +162,24 @@ type worker struct {
 	closeErr error
 }
 
-func (w *worker) send(ctx context.Context, frame workerproto.Frame) error {
+// send writes one frame, bounded by its own deadline and by nothing else.
+//
+// Deliberately not the caller's context, and this is load-bearing rather than
+// tidy. A write interrupted by a cancelled context leaves a partial frame in the
+// stream, so the library closes the connection — and several agents are
+// multiplexed over this one. Handing an agent's context to the write would mean
+// that agent cancelling its own call could take down every other agent's sandbox
+// on that worker. Measured, not theorised: about a hundred cancelled calls killed
+// the connection, and a bystander lost its worker.
+//
+// A caller that gives up is served by the select in call, which stops waiting and
+// tells the worker to cancel. That is what cancellation is for here; aborting the
+// write is not.
+func (w *worker) send(frame workerproto.Frame) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 
-	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
+	writeCtx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
 	return wsjson.Write(writeCtx, w.conn, frame)
 }
@@ -414,7 +427,7 @@ func (h *Hub) call(ctx context.Context, agentID string, op workerproto.Op, paylo
 	w.pending[id] = waiter
 	w.mu.Unlock()
 
-	if err := w.send(ctx, workerproto.Frame{
+	if err := w.send(workerproto.Frame{
 		Type:    workerproto.FrameRequest,
 		ID:      id,
 		AgentID: agentID,
@@ -444,9 +457,7 @@ func (h *Hub) call(ctx context.Context, agentID string, op workerproto.Op, paylo
 		delete(w.pending, id)
 		w.mu.Unlock()
 
-		cancelCtx, cancel := context.WithTimeout(context.Background(), writeTimeout)
-		defer cancel()
-		if err := w.send(cancelCtx, workerproto.Frame{Type: workerproto.FrameCancel, ID: id}); err != nil {
+		if err := w.send(workerproto.Frame{Type: workerproto.FrameCancel, ID: id}); err != nil {
 			slog.Warn("could not tell the worker to cancel", "worker_id", w.id, "error", err)
 		}
 		return ctx.Err()

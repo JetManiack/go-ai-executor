@@ -29,6 +29,15 @@ produced, which needs the exec id the tool currently keeps to itself.
   renders.
 - **Search and download.** Grepping a long run, and saving it, both currently
   mean selecting text in the browser.
+- **Coalescing tiny writes.** One event is published per read, and a read returns
+  whatever is in the pipe — so a command that flushes per line produces an event
+  per line. Measured: 48KB of shell output arrived as two thousand events of about
+  twenty bytes. A watcher may only fall behind by 256 events before it is
+  disconnected as a slow consumer, so a chatty command can disconnect a browser
+  that is doing nothing wrong; it reconnects and reports a gap, which is honest but
+  avoidable. Batching reads that arrive within a few milliseconds, or under some
+  size, would cut the event count by orders of magnitude without changing what a
+  terminal shows.
 
 ## The worker link
 

@@ -598,6 +598,42 @@ func TestGivingUpOnACallTellsTheWorkerToStop(t *testing.T) {
 	}
 }
 
+func TestOneAgentGivingUpDoesNotDisconnectTheWorker(t *testing.T) {
+	h, _, url := newHub(t)
+
+	w := connect(t, url, "worker-a")
+	w.answerStatusWith(t, "worker-a")
+	waitForWorkers(t, h, 1)
+
+	// The cancels have to be drained or the fake worker's read loop wedges on a
+	// full channel, which would look like the bug this test is about.
+	go func() {
+		for range w.cancels {
+		}
+	}()
+
+	// The frame for a request used to be written with the calling agent's context.
+	// A write interrupted by a cancelled context leaves a partial frame, so the
+	// library closes the connection — and the connection is shared. So an agent
+	// cancelling its own call took every other agent's sandbox on that worker with
+	// it. Around a hundred cancellations were enough.
+	for i := range 300 {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _, _ = h.Exec(ctx, "agent-1", workerproto.ExecRequest{Command: "/bin/true"}) }()
+		cancel()
+
+		if len(h.Workers()) == 0 {
+			t.Fatalf("the worker connection died after %d cancelled calls", i+1)
+		}
+	}
+
+	// The point is the bystander: an agent that cancelled nothing must not have
+	// lost anything.
+	if _, err := h.Status(context.Background(), "bystander"); err != nil {
+		t.Fatalf("an agent that cancelled nothing lost its worker: %v", err)
+	}
+}
+
 func TestOutputEventsFromAWorkerReachWatchers(t *testing.T) {
 	h, bus, url := newHub(t)
 
