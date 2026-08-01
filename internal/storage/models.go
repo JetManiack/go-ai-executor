@@ -168,9 +168,13 @@ type AuditEvent struct {
 }
 
 // Outcomes an AuditEvent's finished row can record.
+//
+// There is deliberately no "denied": authentication happens before a tool
+// handler is reached, so a call with a bad token never gets as far as the
+// journal. A name with no producer reads as a gap in the data rather than as an
+// outcome that cannot occur.
 const (
 	AuditOutcomeOK      = "ok"
 	AuditOutcomeError   = "error"
 	AuditOutcomeBlocked = "blocked"
-	AuditOutcomeDenied  = "denied"
 )

@@ -372,6 +372,13 @@ func (h *Hub) workerFor(agentID string) (*worker, error) {
 			best = w
 		}
 	}
+	// Unreachable, given the emptiness check above — and stated anyway, because
+	// every caller dereferences what this returns, and "cannot be nil unless the
+	// map is empty, which we checked" is an invariant a later edit can break
+	// silently. Failing as ErrNoWorker is also the honest answer if it ever did.
+	if best == nil {
+		return nil, ErrNoWorker
+	}
 	h.assignments[agentID] = best
 	return best, nil
 }

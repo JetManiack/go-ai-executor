@@ -52,10 +52,17 @@ func TestAWriteAndReadCrossTheProcessBoundary(t *testing.T) {
 	r := runner(t)
 	ctx := context.Background()
 
-	if out, err := r.Do(ctx, 0, sandboxop.Request{
+	// The two failures are checked apart, because the code distinguishes them: an
+	// error from Do means the helper did not run, an error inside the response
+	// means it ran and the operation failed.
+	out, err := r.Do(ctx, 0, sandboxop.Request{
 		Root: root, Op: sandboxop.OpWrite, Name: "notes/today.txt", Content: []byte("written by the child"),
-	}); err != nil || out.Err() != nil {
-		t.Fatalf("write: %v / %v", err, out.Err())
+	})
+	if err != nil {
+		t.Fatalf("the helper did not run: %v", err)
+	}
+	if err := out.Err(); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 
 	// Parent directories are created, as the in-process path does.
@@ -63,15 +70,15 @@ func TestAWriteAndReadCrossTheProcessBoundary(t *testing.T) {
 		t.Fatalf("the file is not on disk: %v", err)
 	}
 
-	out, err := r.Do(ctx, 0, sandboxop.Request{Root: root, Op: sandboxop.OpRead, Name: "notes/today.txt"})
+	read, err := r.Do(ctx, 0, sandboxop.Request{Root: root, Op: sandboxop.OpRead, Name: "notes/today.txt"})
 	if err != nil {
+		t.Fatalf("the helper did not run: %v", err)
+	}
+	if err := read.Err(); err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if err := out.Err(); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(out.Content) != "written by the child" {
-		t.Errorf("content = %q", out.Content)
+	if string(read.Content) != "written by the child" {
+		t.Errorf("content = %q", read.Content)
 	}
 }
 
@@ -86,16 +93,22 @@ func TestListingAndDeletingCrossTheProcessBoundary(t *testing.T) {
 	ctx := context.Background()
 
 	out, err := r.Do(ctx, 0, sandboxop.Request{Root: root, Op: sandboxop.OpList, Name: "."})
-	if err != nil || out.Err() != nil {
-		t.Fatalf("list: %v / %v", err, out.Err())
+	if err != nil {
+		t.Fatalf("the helper did not run: %v", err)
+	}
+	if err := out.Err(); err != nil {
+		t.Fatalf("list: %v", err)
 	}
 	if len(out.Files) != 2 {
 		t.Fatalf("files = %+v, want two", out.Files)
 	}
 
 	deleted, err := r.Do(ctx, 0, sandboxop.Request{Root: root, Op: sandboxop.OpDelete, Name: "drop.txt"})
-	if err != nil || deleted.Err() != nil {
-		t.Fatalf("delete: %v / %v", err, deleted.Err())
+	if err != nil {
+		t.Fatalf("the helper did not run: %v", err)
+	}
+	if err := deleted.Err(); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
 	if !deleted.Existed || deleted.WasDirectory {
 		t.Errorf("delete = %+v, want an existing file", deleted)
@@ -136,11 +149,12 @@ func TestAnOperationFailureComesBackAsAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the helper itself failed: %v", err)
 	}
-	if out.Err() == nil {
+	opErr := out.Err()
+	if opErr == nil {
 		t.Fatal("reading a missing file reported success")
 	}
-	if !strings.Contains(out.Err().Error(), "not-there.txt") {
-		t.Errorf("err = %v, want it to name the file", out.Err())
+	if !strings.Contains(opErr.Error(), "not-there.txt") {
+		t.Errorf("err = %v, want it to name the file", opErr)
 	}
 }
 

@@ -738,7 +738,7 @@ func (s *Sandbox) ListDir(relPath string) ([]FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 
 	entries, err := dir.ReadDir(-1)
 	if err != nil {

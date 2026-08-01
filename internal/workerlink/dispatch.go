@@ -142,6 +142,12 @@ func (l *Link) exec(ctx context.Context, sb *sandbox.Sandbox, frame workerproto.
 		timeout = time.Duration(in.TimeoutSec) * time.Second
 	}
 
+	// The result is read even when execErr is set, and that is the point rather
+	// than an oversight: a command cut short by its timeout or by an operator's
+	// stop has usually produced output already, and the whole value of a timeout
+	// is seeing what the command managed to say before it hit one. ExecResult is a
+	// value, so there is nothing to dereference — the fields are simply what was
+	// collected before the error.
 	res, execErr := sb.ExecCommand(ctx, in.Command, in.Args, timeout, in.WorkDir)
 	out := workerproto.ExecResponse{
 		ExecID:     res.ExecID,
