@@ -22,14 +22,14 @@ func readFileHandler(deps Deps) mcp.ToolHandlerFor[ReadFileInput, ReadFileOutput
 		if in.Path == "" {
 			return nil, ReadFileOutput{}, errors.New("path cannot be empty")
 		}
-		sb, err := sandboxForActor(ctx, deps)
+		agentID, err := agentForCall(ctx, deps)
 		if err != nil {
 			return nil, ReadFileOutput{}, err
 		}
-		data, err := sb.ReadFile(in.Path)
+		content, err := deps.Executor.ReadFile(ctx, agentID, in.Path)
 		if err != nil {
 			return nil, ReadFileOutput{}, fmt.Errorf("read file: %w", err)
 		}
-		return nil, ReadFileOutput{Path: in.Path, Content: string(data)}, nil
+		return nil, ReadFileOutput{Path: in.Path, Content: content}, nil
 	}
 }

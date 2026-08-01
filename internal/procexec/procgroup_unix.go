@@ -37,6 +37,31 @@ func Configure(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
+// DropTo makes the command run as uid, dropping every privilege the parent has
+// between fork and exec. A zero uid leaves the command as its parent's user.
+//
+// The runtime performs setgroups(0) → setgid → setuid in the child, which is why
+// there is no helper binary here and nothing to get wrong in shell: the
+// supplementary groups are emptied explicitly, because inheriting the parent's
+// would hand every agent whatever group the worker happens to be in.
+//
+// It needs CAP_SETUID and CAP_SETGID in the parent, which a worker pod is given
+// and a developer's machine is not — hence the zero case, and hence commands run
+// as one user outside a cluster.
+func DropTo(cmd *exec.Cmd, uid uint32) {
+	if uid == 0 {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Credential = &syscall.Credential{
+		Uid:    uid,
+		Gid:    uid,
+		Groups: []uint32{},
+	}
+}
+
 // KillGroup SIGKILLs every process in the group led by pid.
 //
 // Setpgid makes the child's process-group ID equal its PID, so the negated PID

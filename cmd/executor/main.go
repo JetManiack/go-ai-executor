@@ -22,8 +22,10 @@ import (
 	"github.com/JetManiack/go-ai-executor/internal/humanauth"
 	"github.com/JetManiack/go-ai-executor/internal/mcpserver"
 	"github.com/JetManiack/go-ai-executor/internal/restapi"
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 	"github.com/JetManiack/go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/stream"
+	"github.com/JetManiack/go-ai-executor/internal/workerhub"
+	"github.com/JetManiack/go-ai-executor/internal/workerproto"
 )
 
 // version is stamped at build time by the Makefile (-X main.version=...).
@@ -32,7 +34,7 @@ var version = "dev"
 func newRootCommand() *cli.Command {
 	return &cli.Command{
 		Name:    "executor",
-		Usage:   "MCP server giving AI agents a jailed shell and filesystem, with a live read-only terminal for humans",
+		Usage:   "MCP server giving AI agents a jailed filesystem and command execution on worker pods, with a live read-only terminal for humans",
 		Version: version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
@@ -48,33 +50,19 @@ func newRootCommand() *cli.Command {
 				Sources: cli.EnvVars("DB_DSN"),
 			},
 			&cli.StringFlag{
-				Name:    "sandbox-dir",
-				Value:   "./scratch",
-				Usage:   "root directory under which each agent gets its own jailed sandbox",
-				Sources: cli.EnvVars("SANDBOX_DIR"),
+				Name:    "worker-token",
+				Usage:   "shared secret workers present when they dial /worker; without it the worker endpoint refuses every connection and nothing can execute",
+				Sources: cli.EnvVars("WORKER_TOKEN"),
 			},
 			&cli.DurationFlag{
-				Name:    "default-timeout",
-				Value:   30 * time.Second,
-				Usage:   "default per-command execution timeout, when the caller doesn't set one",
-				Sources: cli.EnvVars("DEFAULT_TIMEOUT"),
-			},
-			&cli.IntFlag{
-				Name:    "max-output-bytes",
-				Value:   512 << 10,
-				Usage:   "maximum stdout/stderr a single command returns; longer output is truncated",
-				Sources: cli.EnvVars("MAX_OUTPUT_BYTES"),
-			},
-			&cli.StringSliceFlag{
-				Name:    "env-passthrough",
-				Value:   sandbox.DefaultEnvPassthrough,
-				Usage:   "environment variable names sandboxed commands inherit from this process; everything else is dropped, so an agent never sees this service's own credentials",
-				Sources: cli.EnvVars("ENV_PASSTHROUGH"),
-			},
-			&cli.StringSliceFlag{
-				Name:    "env",
-				Usage:   "extra KEY=VALUE entries to put in every sandboxed command's environment (repeatable) — this is where a token an agent's task genuinely needs belongs",
-				Sources: cli.EnvVars("SANDBOX_ENV"),
+				Name:  "audit-retention",
+				Value: 7 * 24 * time.Hour,
+				// Rotation is by age rather than by row count, so the promise an
+				// operator makes is one they can state: we keep a week. Zero keeps
+				// everything, which is a decision rather than a default — an
+				// unbounded table is fine right up until it is not.
+				Usage:   "how long the action journal is kept before rows are pruned; 0 keeps everything",
+				Sources: cli.EnvVars("AUDIT_RETENTION"),
 			},
 			&cli.BoolFlag{
 				Name:    "auth-stub",
@@ -114,7 +102,7 @@ func newRootCommand() *cli.Command {
 			},
 			&cli.IntFlag{
 				Name:    "stream-buffer-bytes",
-				Value:   sandbox.DefaultStreamBufferBytes,
+				Value:   stream.DefaultStreamBufferBytes,
 				Usage:   "how much recent terminal output is retained per sandbox for replay to a connecting watcher",
 				Sources: cli.EnvVars("STREAM_BUFFER_BYTES"),
 			},
@@ -125,28 +113,14 @@ func newRootCommand() *cli.Command {
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			passthrough := cmd.StringSlice("env-passthrough")
-			if err := sandbox.ValidateEnvPassthrough(passthrough); err != nil {
-				return err
-			}
-			// Not refused, only surfaced: an agent whose task is to call an API
-			// does need its token, and only the operator knows which variable
-			// that is. Saying so once at startup beats discovering it in an
-			// `env` an agent ran.
-			if suspicious := sandbox.SuspiciousEnvNames(passthrough); len(suspicious) > 0 {
-				slog.Warn("passing possibly-sensitive environment variables to sandboxed commands", "names", suspicious)
-			}
+			// This process no longer executes anything. The bus retains terminal
+			// output and fans it out to browsers; the hub routes work to the
+			// workers that do the executing.
+			bus := stream.NewBroadcaster(cmd.Int("stream-buffer-bytes"))
+			hub := workerhub.New(bus)
 
-			mgr, err := sandbox.NewManager(sandbox.Config{
-				RootDir:           cmd.String("sandbox-dir"),
-				DefaultTimeout:    cmd.Duration("default-timeout"),
-				MaxOutputBytes:    cmd.Int("max-output-bytes"),
-				StreamBufferBytes: cmd.Int("stream-buffer-bytes"),
-				EnvPassthrough:    passthrough,
-				ExtraEnv:          cmd.StringSlice("env"),
-			})
-			if err != nil {
-				return fmt.Errorf("initialize sandbox manager: %w", err)
+			if cmd.String("worker-token") == "" {
+				slog.Warn("no --worker-token configured: workers cannot connect, so every tool call will report that no worker is available")
 			}
 
 			dsn := cmd.String("db-dsn")
@@ -154,9 +128,9 @@ func newRootCommand() *cli.Command {
 			db, err := storage.Open(dsn)
 			if err != nil {
 				slog.Error("storage.Open failed at boot; serving /livez and /readyz (not ready) while retrying in the background instead of exiting", "error", err)
-				return serveDegradedUntilReady(ctx, cmd, mgr, dsn, err)
+				return serveDegradedUntilReady(ctx, cmd, bus, hub, dsn, err)
 			}
-			return serveReady(ctx, cmd, mgr, db)
+			return serveReady(ctx, cmd, bus, hub, db)
 		},
 	}
 }
@@ -166,7 +140,7 @@ func newRootCommand() *cli.Command {
 // reflects db actually being usable. It's shared between the immediate-ready
 // startup path (serveReady) and the recovers-after-retry path
 // (serveDegradedUntilReady), so both build identical routes.
-func buildAppHandler(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) (http.Handler, health.ReadyChecker, error) {
+func buildAppHandler(ctx context.Context, cmd *cli.Command, bus *stream.Broadcaster, hub *workerhub.Hub, db *gorm.DB) (http.Handler, health.ReadyChecker, error) {
 	var authProvider humanauth.Provider
 	var oidcHandlers humanauth.OIDCHandlers
 	useOIDC := !cmd.Bool("auth-stub")
@@ -221,10 +195,15 @@ func buildAppHandler(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", mcpserver.NewHTTPHandler(mcpserver.Deps{DB: db, Manager: mgr, Version: version}))
+	mux.Handle("/mcp", mcpserver.NewHTTPHandler(mcpserver.Deps{DB: db, Executor: hub, Version: version}))
+	// Workers dial in here. Mounted on the same listener as everything else, so a
+	// deployment can put it behind the same ingress or, better, keep it on an
+	// internal Service the agents' ingress never reaches.
+	mux.Handle(workerproto.Path, hub.Handler(cmd.String("worker-token")))
 	mux.Handle("/api/", http.StripPrefix("/api", restapi.NewRouter(restapi.Options{
 		DB:           db,
-		Manager:      mgr,
+		Bus:          bus,
+		Hub:          hub,
 		AuthProvider: authProvider,
 	})))
 	if useOIDC {
@@ -255,11 +234,13 @@ func newServer(addr string, handler http.Handler) *http.Server {
 // serveReady is the happy-path startup: db is already open, so every route
 // builds immediately and the server serves fully-ready from the first accepted
 // connection.
-func serveReady(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager, db *gorm.DB) error {
-	appHandler, readyChecker, err := buildAppHandler(ctx, cmd, mgr, db)
+func serveReady(ctx context.Context, cmd *cli.Command, bus *stream.Broadcaster, hub *workerhub.Hub, db *gorm.DB) error {
+	appHandler, readyChecker, err := buildAppHandler(ctx, cmd, bus, hub, db)
 	if err != nil {
 		return err
 	}
+
+	go pruneAuditPeriodically(ctx, db, cmd.Duration("audit-retention"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", health.Livez)
@@ -291,7 +272,7 @@ func serveReady(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager, db 
 // storage.Open with capped exponential backoff in the background. Once it
 // succeeds the real routes are swapped in on the same listener, with no
 // restart, and control folds into the same serve/shutdown loop serveReady uses.
-func serveDegradedUntilReady(ctx context.Context, cmd *cli.Command, mgr *sandbox.Manager, dsn string, firstErr error) error {
+func serveDegradedUntilReady(ctx context.Context, cmd *cli.Command, bus *stream.Broadcaster, hub *workerhub.Hub, dsn string, firstErr error) error {
 	var mu sync.RWMutex
 	checker := health.ReadyChecker{
 		Ping:            func(context.Context) error { return firstErr },
@@ -336,7 +317,7 @@ func serveDegradedUntilReady(ctx context.Context, cmd *cli.Command, mgr *sandbox
 			}
 			return err
 		case db := <-dbReady:
-			handler, readyChecker, err := buildAppHandler(ctx, cmd, mgr, db)
+			handler, readyChecker, err := buildAppHandler(ctx, cmd, bus, hub, db)
 			if err != nil {
 				if shutdownErr := shutdown(server); shutdownErr != nil {
 					slog.Error("shutdown after failed route build", "error", shutdownErr)
@@ -398,5 +379,44 @@ func main() {
 	if err := newRootCommand().Run(ctx, os.Args); err != nil {
 		slog.Error("server exited with error", "error", err)
 		os.Exit(1)
+	}
+}
+
+// auditPruneInterval is how often the journal is trimmed. Hourly rather than at
+// startup only, because a server that stays up for a month would otherwise honour
+// its retention promise once.
+const auditPruneInterval = time.Hour
+
+// pruneAuditPeriodically deletes journal rows past their retention until ctx ends.
+//
+// Failures are logged and the loop continues: an unprunable journal is a disk
+// problem to notice, not a reason to stop serving. It runs on every replica,
+// which is harmless — deleting rows already deleted is a no-op.
+func pruneAuditPeriodically(ctx context.Context, db *gorm.DB, retention time.Duration) {
+	if db == nil || retention <= 0 {
+		return
+	}
+
+	prune := func() {
+		deleted, err := storage.PruneAudit(db, retention)
+		if err != nil {
+			slog.Error("could not prune the action journal", "error", err)
+			return
+		}
+		if deleted > 0 {
+			slog.Info("pruned the action journal", "rows", deleted, "retention", retention)
+		}
+	}
+
+	prune()
+	ticker := time.NewTicker(auditPruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
 	}
 }

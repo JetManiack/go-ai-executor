@@ -12,24 +12,24 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/JetManiack/go-ai-executor/internal/humanauth"
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 	"github.com/JetManiack/go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/stream"
 )
 
 // sandboxResponse is one row of the sandbox list.
 //
-// Live is false for an agent that has not made a tool call since this process
-// started: sandboxes are instantiated lazily, so such an agent has no directory,
-// no processes and no retained output — but it can still be blocked, which is
-// what stops its next call.
+// Live means a worker is currently serving this agent, and Worker names it: in a
+// scaled-out pool "which pod holds my sandbox" is the question an operator asks
+// first. An agent with no worker can still be blocked — the block is what refuses
+// its next call, wherever that lands.
 type sandboxResponse struct {
-	ActorID         string                `json:"actor_id"`
-	DisplayName     string                `json:"display_name"`
-	Live            bool                  `json:"live"`
-	RunningCommands int                   `json:"running_commands"`
-	Watchers        int                   `json:"watchers"`
-	LastSeq         uint64                `json:"last_seq"`
-	Block           *storage.SandboxBlock `json:"block,omitempty"`
+	ActorID     string                `json:"actor_id"`
+	DisplayName string                `json:"display_name"`
+	Live        bool                  `json:"live"`
+	Worker      string                `json:"worker,omitempty"`
+	Watchers    int                   `json:"watchers"`
+	LastSeq     uint64                `json:"last_seq"`
+	Block       *storage.SandboxBlock `json:"block,omitempty"`
 }
 
 type blockRequest struct {
@@ -53,20 +53,22 @@ func listSandboxesHandler(opts Options) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		live := opts.Manager.LiveSandboxes()
-
 		resp := make([]sandboxResponse, 0, len(agents))
 		for _, agent := range agents {
 			row := sandboxResponse{
 				ActorID:     agent.ID,
 				DisplayName: agent.DisplayName,
 				Block:       blocks[agent.ID],
-				LastSeq:     opts.Manager.Broadcaster().LastSeq(agent.ID),
-				Watchers:    opts.Manager.Broadcaster().WatcherCount(agent.ID),
+				LastSeq:     opts.Bus.LastSeq(agent.ID),
+				Watchers:    opts.Bus.WatcherCount(agent.ID),
 			}
-			if sb, ok := live[agent.ID]; ok {
+			// Deliberately not asking every worker for a running-command count:
+			// the list is polled, and one round trip per agent per poll would put
+			// the pool under load proportional to how many operators have the page
+			// open. The terminal shows what is running.
+			if workerID, ok := opts.Hub.WorkerFor(agent.ID); ok {
 				row.Live = true
-				row.RunningCommands = sb.RunningCommands()
+				row.Worker = workerID
 			}
 			resp = append(resp, row)
 		}
@@ -77,8 +79,8 @@ func listSandboxesHandler(opts Options) http.HandlerFunc {
 			if (resp[i].Block != nil) != (resp[j].Block != nil) {
 				return resp[i].Block != nil
 			}
-			if resp[i].RunningCommands != resp[j].RunningCommands {
-				return resp[i].RunningCommands > resp[j].RunningCommands
+			if resp[i].Live != resp[j].Live {
+				return resp[i].Live
 			}
 			return resp[i].DisplayName < resp[j].DisplayName
 		})
@@ -111,12 +113,12 @@ func getSandboxHandler(opts Options) http.HandlerFunc {
 			ActorID:     agent.ID,
 			DisplayName: agent.DisplayName,
 			Block:       block,
-			LastSeq:     opts.Manager.Broadcaster().LastSeq(actorID),
-			Watchers:    opts.Manager.Broadcaster().WatcherCount(actorID),
+			LastSeq:     opts.Bus.LastSeq(actorID),
+			Watchers:    opts.Bus.WatcherCount(actorID),
 		}
-		if sb, ok := opts.Manager.LiveSandboxes()[actorID]; ok {
+		if workerID, ok := opts.Hub.WorkerFor(actorID); ok {
 			resp.Live = true
-			resp.RunningCommands = sb.RunningCommands()
+			resp.Worker = workerID
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -167,7 +169,7 @@ func blockSandboxHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
-		killed, killErr := opts.Manager.KillSandbox(actorID, admin.DisplayName, req.Reason)
+		killed, killErr := opts.Hub.Kill(r.Context(), actorID, admin.DisplayName, req.Reason)
 		if killErr != nil {
 			// The block is already in force, which is the part that matters, so
 			// this is reported rather than rolled back: a partially-killed
@@ -181,7 +183,7 @@ func blockSandboxHandler(opts Options) http.HandlerFunc {
 			block.KilledProcesses = killed
 		}
 
-		opts.Manager.Broadcaster().Publish(blockedEvent(actorID, admin.DisplayName, req.Reason))
+		opts.Bus.Publish(blockedEvent(actorID, admin.DisplayName, req.Reason))
 		writeJSON(w, http.StatusCreated, blockResponse{Block: block, KilledProcesses: killed})
 	}
 }
@@ -206,7 +208,7 @@ func releaseSandboxHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
-		opts.Manager.Broadcaster().Publish(releasedEvent(actorID, admin.DisplayName))
+		opts.Bus.Publish(releasedEvent(actorID, admin.DisplayName))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -214,20 +216,20 @@ func releaseSandboxHandler(opts Options) http.HandlerFunc {
 // blockedEvent and releasedEvent put administrative state changes into the
 // terminal stream itself, so a human watching sees why output stopped — or that
 // it is expected to resume — instead of watching it simply go quiet.
-func blockedEvent(actorID, byActor, reason string) sandbox.Event {
-	return sandbox.Event{
+func blockedEvent(actorID, byActor, reason string) stream.Event {
+	return stream.Event{
 		SandboxID: actorID,
-		Kind:      sandbox.EventBlocked,
+		Kind:      stream.EventBlocked,
 		At:        time.Now().UTC(),
 		ByActor:   byActor,
 		Reason:    reason,
 	}
 }
 
-func releasedEvent(actorID, byActor string) sandbox.Event {
-	return sandbox.Event{
+func releasedEvent(actorID, byActor string) stream.Event {
+	return stream.Event{
 		SandboxID: actorID,
-		Kind:      sandbox.EventReleased,
+		Kind:      stream.EventReleased,
 		At:        time.Now().UTC(),
 		ByActor:   byActor,
 	}

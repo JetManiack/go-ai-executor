@@ -33,6 +33,7 @@ func Open(dsn string) (*gorm.DB, error) {
 			&UserIdentity{},
 			&Session{},
 			&SandboxBlock{},
+			&AuditEvent{},
 		); err != nil {
 			return fmt.Errorf("automigrate: %w", err)
 		}

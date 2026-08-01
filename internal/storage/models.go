@@ -95,3 +95,82 @@ type SandboxBlock struct {
 	// sandbox".
 	KilledProcesses int `json:"killed_processes"`
 }
+
+// AuditPhase distinguishes the two rows one action writes.
+type AuditPhase string
+
+const (
+	// AuditStarted is written before the action is attempted, AuditFinished
+	// after it returns.
+	AuditStarted  AuditPhase = "started"
+	AuditFinished AuditPhase = "finished"
+)
+
+// AuditEvent is one row of the journal: who did what, and how it went.
+//
+// Two rows per action rather than one, sharing a CallID. One row written on
+// completion would be cheaper and would lose exactly the cases worth having a
+// journal for: a command that hung until the pod was killed, or a process that
+// died mid-call, leaves no row at all and reads as an action that never
+// happened. A started row with no finished row is a question worth asking.
+//
+// This is a journal, not the terminal. It records that a file was written and
+// how many bytes; the contents are the stream's business, and putting them here
+// would turn the database into a log store with none of the retention a log
+// store has.
+type AuditEvent struct {
+	ID string `gorm:"type:char(36);primaryKey" json:"id"`
+
+	// CallID ties the started and finished rows of one action together.
+	CallID string `gorm:"type:char(36);not null;index" json:"call_id"`
+
+	Phase AuditPhase `gorm:"type:varchar(10);not null" json:"phase"`
+
+	// At is indexed because every query against this table is bounded by time:
+	// the UI asks for a window, and the pruner deletes by age.
+	At time.Time `gorm:"not null;index" json:"at"`
+
+	// ActorID is indexed for "what did this agent do", the other question the
+	// table exists to answer. Name and kind are denormalised so the journal
+	// still reads correctly after an actor is deleted — a row that says only
+	// "actor 4f2e..." is a record of nothing once the actor is gone.
+	ActorID   string    `gorm:"type:char(36);not null;index" json:"actor_id"`
+	ActorName string    `gorm:"not null" json:"actor_name"`
+	ActorKind ActorKind `gorm:"type:varchar(10);not null" json:"actor_kind"`
+
+	// Action is the tool or operation name: exec_command, write_file,
+	// block_sandbox, issue_token.
+	Action string `gorm:"type:varchar(40);not null;index" json:"action"`
+
+	// Target is what the action was aimed at — a path, or a program and its
+	// arguments. Truncated on write rather than stored whole: an argument vector
+	// can be enormous, and a journal that a single call can bloat is one an
+	// operator eventually turns off.
+	Target string `gorm:"type:text" json:"target,omitempty"`
+
+	// WorkerID names the worker that served the call, empty when the action
+	// never reached one — including when it was refused because none was
+	// connected.
+	WorkerID string `json:"worker_id,omitempty"`
+
+	// ExecID ties this to the terminal stream's events for the same command, so
+	// a journal entry leads to the output it produced while that is still
+	// retained.
+	ExecID string `gorm:"type:char(36)" json:"exec_id,omitempty"`
+
+	// Outcome and Error are set on the finished row only.
+	Outcome    string `gorm:"type:varchar(10)" json:"outcome,omitempty"`
+	Error      string `gorm:"type:text" json:"error,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+
+	// Bytes is the size the action moved: output returned, file written or read.
+	Bytes int `json:"bytes,omitempty"`
+}
+
+// Outcomes an AuditEvent's finished row can record.
+const (
+	AuditOutcomeOK      = "ok"
+	AuditOutcomeError   = "error"
+	AuditOutcomeBlocked = "blocked"
+	AuditOutcomeDenied  = "denied"
+)

@@ -7,19 +7,24 @@ import (
 	"sync"
 )
 
-// Manager owns one sandbox per agent and the event bus their output is streamed
-// through.
+// Manager owns one sandbox per agent and the sink their output is streamed to.
 type Manager struct {
-	baseConfig  Config
-	broadcaster *Broadcaster
+	baseConfig Config
+	sink       EventSink
 
 	mu        sync.RWMutex
 	instances map[string]*Sandbox
 }
 
-func NewManager(cfg Config) (*Manager, error) {
+// NewManager creates a manager rooted at cfg.RootDir, publishing events to sink.
+// A nil sink discards them, which is what a sandbox with nobody watching wants.
+func NewManager(cfg Config, sink EventSink) (*Manager, error) {
 	if cfg.RootDir == "" {
 		return nil, errors.New("root directory cannot be empty")
+	}
+
+	if err := cfg.UIDRange.Validate(); err != nil {
+		return nil, err
 	}
 
 	absRoot, err := filepath.Abs(cfg.RootDir)
@@ -29,15 +34,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	cfg.RootDir = absRoot
 
 	return &Manager{
-		baseConfig:  cfg,
-		broadcaster: NewBroadcaster(cfg.StreamBufferBytes),
-		instances:   make(map[string]*Sandbox),
+		baseConfig: cfg,
+		sink:       sink,
+		instances:  make(map[string]*Sandbox),
 	}, nil
 }
-
-// Broadcaster returns the manager's event bus, which fans sandbox output out to
-// the humans watching a terminal.
-func (m *Manager) Broadcaster() *Broadcaster { return m.broadcaster }
 
 // GetSandbox returns agentID's sandbox, creating it on first use.
 //
@@ -59,7 +60,15 @@ func (m *Manager) GetSandbox(agentID string) (*Sandbox, error) {
 	cfg := m.baseConfig
 	cfg.RootDir = filepath.Join(m.baseConfig.RootDir, "agents", agentID)
 
-	sb, err := newSandbox(agentID, cfg, m.broadcaster)
+	// The id is settled before the sandbox exists, because creating the directory
+	// is what claims it — and the claim has to be visible to the next agent that
+	// asks for one.
+	uid, err := m.assignUID(agentID, cfg.RootDir)
+	if err != nil {
+		return nil, fmt.Errorf("assign a user id to agent %s: %w", agentID, err)
+	}
+
+	sb, err := newSandbox(agentID, cfg, m.sink, uid)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox for agent %s: %w", agentID, err)
 	}

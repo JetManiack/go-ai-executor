@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -43,7 +44,10 @@ var deniedEnvNames = []string{"DB_DSN", "OIDC_CLIENT_SECRET", "SESSION_ENCRYPTIO
 // managedEnvNames are set by the sandbox itself and cannot be inherited: HOME and
 // PWD are pointed inside the jail, and letting the server's values through would
 // aim a command's "home" at the service account's real home directory.
-var managedEnvNames = []string{"HOME", "PWD"}
+// VIRTUAL_ENV joins them because the sandbox points it at the environment it
+// created: inheriting the worker's would aim an agent's Python at a directory it
+// cannot see.
+var managedEnvNames = []string{"HOME", "PWD", "VIRTUAL_ENV"}
 
 // ValidateEnvPassthrough reports whether names is a usable passthrough list.
 func ValidateEnvPassthrough(names []string) error {
@@ -88,8 +92,12 @@ func SuspiciousEnvNames(names []string) []string {
 // buildEnv assembles the environment one command runs with: the inherited
 // variables first, then the operator's literal additions, then the two the
 // sandbox controls — so HOME and PWD always win, whatever came before them.
-func buildEnv(cfg Config, workDir string) []string {
-	env := make([]string, 0, len(cfg.EnvPassthrough)+len(cfg.ExtraEnv)+2)
+// venvBin, when set, is prepended to PATH and announced as VIRTUAL_ENV — which is
+// all `activate` does. There is no shell here to source it in, so the environment
+// is where activation lives, and it applies to every command rather than to the
+// ones an agent remembered to activate first.
+func buildEnv(cfg Config, workDir, venvBin string) []string {
+	env := make([]string, 0, len(cfg.EnvPassthrough)+len(cfg.ExtraEnv)+4)
 
 	for _, name := range cfg.EnvPassthrough {
 		name = strings.TrimSpace(name)
@@ -97,13 +105,20 @@ func buildEnv(cfg Config, workDir string) []string {
 			continue
 		}
 		value, ok := os.LookupEnv(name)
-		if !ok {
-			if name == "PATH" {
-				// A command with no PATH at all cannot resolve a single tool by
-				// name, which looks like every tool being missing rather than
-				// like a misconfigured server.
-				env = append(env, "PATH="+FallbackPATH)
+		if name == "PATH" {
+			// A command with no PATH at all cannot resolve a single tool by name,
+			// which looks like every tool being missing rather than like a
+			// misconfigured server.
+			if !ok {
+				value = FallbackPATH
 			}
+			if venvBin != "" {
+				value = venvBin + string(os.PathListSeparator) + value
+			}
+			env = append(env, "PATH="+value)
+			continue
+		}
+		if !ok {
 			continue
 		}
 		env = append(env, name+"="+value)
@@ -111,6 +126,9 @@ func buildEnv(cfg Config, workDir string) []string {
 
 	env = append(env, cfg.ExtraEnv...)
 	env = append(env, "HOME="+cfg.RootDir, "PWD="+workDir)
+	if venvBin != "" {
+		env = append(env, "VIRTUAL_ENV="+filepath.Dir(venvBin))
+	}
 	return env
 }
 

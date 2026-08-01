@@ -12,8 +12,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"gorm.io/gorm"
 
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 	"github.com/JetManiack/go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/workertest"
 )
 
 // openTestDB gives each test its own migrated SQLite database. The Postgres
@@ -48,24 +48,14 @@ func mustAgentWithToken(t *testing.T, db *gorm.DB, name string) (*storage.Actor,
 	return agent, token
 }
 
-// newTestManager builds a sandbox manager rooted in a per-test temp directory.
-func newTestManager(t *testing.T) *sandbox.Manager {
-	t.Helper()
-	mgr, err := sandbox.NewManager(sandbox.Config{
-		RootDir:        t.TempDir(),
-		DefaultTimeout: 5 * time.Second,
-		MaxOutputBytes: 64 << 10,
-		EnvPassthrough: sandbox.DefaultEnvPassthrough,
-	})
-	if err != nil {
-		t.Fatalf("sandbox.NewManager: %v", err)
-	}
-	return mgr
-}
-
+// testDeps wires the MCP surface to a real worker over a real link.
+//
+// A fake executor would be cheaper and would pass while the wire contract was
+// broken: execution crosses a process boundary now, so these tests are only worth
+// as much as the link they run over.
 func testDeps(t *testing.T, db *gorm.DB) Deps {
 	t.Helper()
-	return Deps{DB: db, Manager: newTestManager(t), Version: "test"}
+	return Deps{DB: db, Executor: workertest.StartOne(t).Hub, Version: "test"}
 }
 
 // bearerTransport attaches a fixed bearer token to every request, the way a

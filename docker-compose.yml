@@ -10,6 +10,16 @@
 # Without TEST_POSTGRES_DSN set, Postgres-only tests report SKIP and the rest
 # of the suite runs against SQLite as usual — this container is never required
 # for a normal `go test ./...`.
+#
+# The server and a worker are behind the `app` profile, so the line above still
+# brings up Postgres alone and nothing else. To run the pair instead:
+#
+#   docker compose --profile app up --build
+#
+# That is stub auth on http://localhost:8080 with one worker attached — enough to
+# exercise the split locally, and not something to point at anything real. The
+# worker runs with per-agent user ids, so the isolation it relies on is exercised
+# too rather than only in a cluster.
 services:
   postgres:
     image: postgres:17-alpine
@@ -19,3 +29,51 @@ services:
       POSTGRES_DB: executor_test
     ports:
       - "5432:5432"
+
+  executor:
+    profiles: [app]
+    build: .
+    command: ["executor"]
+    environment:
+      # Stub auth: a fixed, always-admin identity instead of Keycloak. The whole
+      # profile is a local demonstration, and this is the flag that says so.
+      AUTH_STUB: "true"
+      DB_DSN: /app/data/executor.db
+      WORKER_TOKEN: dev-worker-token
+    ports:
+      - "8080:8080"
+    volumes:
+      - executor-data:/app/data
+
+  worker:
+    profiles: [app]
+    build: .
+    command: ["worker"]
+    depends_on: [executor]
+    # Container-root with four capabilities and nothing else, which is what
+    # per-agent user ids need: Kubernetes and Docker both hand added capabilities
+    # only to a container running as uid 0, and dropping to an agent's id needs
+    # SETUID/SETGID. CHOWN hands a sandbox over, KILL stops what is running in one.
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    environment:
+      UID_RANGE: 20000-20999
+      # By service name: the worker dials the server, which is the direction that
+      # makes it deployable without a Service of its own.
+      SERVER_URL: http://executor:8080
+      WORKER_TOKEN: dev-worker-token
+      WORKER_ID: worker-compose
+      SANDBOX_DIR: /sandboxes
+    # tmpfs rather than a named volume, to match the emptyDir a deployed worker
+    # gets: sandboxes do not survive the pod, and pretending otherwise locally
+    # would hide the one behaviour most worth seeing.
+    # The mode is explicit because the container runs as uid 65532 and a tmpfs
+    # mounted root-owned would fail on the first sandbox it tried to create.
+    tmpfs:
+      - /sandboxes:mode=1777
+
+volumes:
+  executor-data:

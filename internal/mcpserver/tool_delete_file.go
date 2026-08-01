@@ -23,11 +23,11 @@ func deleteFileHandler(deps Deps) mcp.ToolHandlerFor[DeleteFileInput, DeleteFile
 		if in.Path == "" {
 			return nil, DeleteFileOutput{}, errors.New("path cannot be empty")
 		}
-		sb, err := sandboxForActor(ctx, deps)
+		agentID, err := agentForCall(ctx, deps)
 		if err != nil {
 			return nil, DeleteFileOutput{}, err
 		}
-		result, err := sb.DeleteFile(in.Path)
+		result, err := deps.Executor.DeleteFile(ctx, agentID, in.Path)
 		if err != nil {
 			return nil, DeleteFileOutput{}, fmt.Errorf("delete: %w", err)
 		}

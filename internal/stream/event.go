@@ -1,4 +1,11 @@
-package sandbox
+// Package stream carries what happens in a sandbox to the humans watching it:
+// the event vocabulary, a bounded per-sandbox retention buffer, and the fan-out
+// to watchers.
+//
+// It lives apart from internal/sandbox because the two ends are in different
+// processes: the worker produces events and the server retains and fans them out,
+// so the server needs this without needing a sandbox at all.
+package stream
 
 import "time"
 

@@ -7,14 +7,13 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/JetManiack/go-ai-executor/internal/humanauth"
 	"github.com/JetManiack/go-ai-executor/internal/restapi"
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 	"github.com/JetManiack/go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/workertest"
 )
 
 // roleProvider authenticates every request as a fixed identity with a chosen
@@ -38,9 +37,9 @@ func adminProvider() roleProvider {
 }
 
 type testAPI struct {
-	server  *httptest.Server
-	db      *gorm.DB
-	manager *sandbox.Manager
+	server *httptest.Server
+	db     *gorm.DB
+	worker *workertest.Harness
 }
 
 // newTestAPI boots the real router over HTTP, so middleware, role gating and the
@@ -53,21 +52,20 @@ func newTestAPI(t *testing.T, provider humanauth.Provider) *testAPI {
 		t.Fatalf("storage.Open: %v", err)
 	}
 
-	cfg := sandbox.DefaultConfig(t.TempDir())
-	cfg.DefaultTimeout = 30 * time.Second
-	mgr, err := sandbox.NewManager(cfg)
-	if err != nil {
-		t.Fatalf("sandbox.NewManager: %v", err)
-	}
+	// A real hub with a real worker behind it: the API's stop button and its
+	// sandbox list both go over the worker link now, and a fake would not exercise
+	// it.
+	worker := workertest.StartOne(t)
 
 	server := httptest.NewServer(restapi.NewRouter(restapi.Options{
 		DB:           db,
-		Manager:      mgr,
+		Bus:          worker.Bus,
+		Hub:          worker.Hub,
 		AuthProvider: provider,
 	}))
 	t.Cleanup(server.Close)
 
-	return &testAPI{server: server, db: db, manager: mgr}
+	return &testAPI{server: server, db: db, worker: worker}
 }
 
 func (api *testAPI) do(t *testing.T, method, path string, body any) *http.Response {

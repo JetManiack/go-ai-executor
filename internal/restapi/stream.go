@@ -12,8 +12,8 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/go-chi/chi/v5"
 
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
 	"github.com/JetManiack/go-ai-executor/internal/storage"
+	"github.com/JetManiack/go-ai-executor/internal/stream"
 )
 
 // writeTimeout bounds a single frame write, not the connection. A watcher whose
@@ -69,8 +69,8 @@ func streamSandboxHandler(opts Options) http.HandlerFunc {
 		}
 
 		ctx := conn.CloseRead(r.Context())
-		replay, sub := opts.Manager.Broadcaster().Subscribe(actorID, after)
-		defer opts.Manager.Broadcaster().Unsubscribe(actorID, sub)
+		replay, sub := opts.Bus.Subscribe(actorID, after)
+		defer opts.Bus.Unsubscribe(actorID, sub)
 
 		for _, event := range replay {
 			if !writeEvent(ctx, conn, event) {
@@ -101,7 +101,7 @@ func streamSandboxHandler(opts Options) http.HandlerFunc {
 }
 
 // writeEvent sends one event, reporting whether the connection is still usable.
-func writeEvent(ctx context.Context, conn *websocket.Conn, event sandbox.Event) bool {
+func writeEvent(ctx context.Context, conn *websocket.Conn, event stream.Event) bool {
 	writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 

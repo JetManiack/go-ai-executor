@@ -6,7 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/workerproto"
 )
 
 type ListDirInput struct {
@@ -14,8 +14,8 @@ type ListDirInput struct {
 }
 
 type ListDirOutput struct {
-	Path  string             `json:"path" jsonschema:"the directory that was listed"`
-	Files []sandbox.FileInfo `json:"files" jsonschema:"entries in the directory, non-recursive"`
+	Path  string                 `json:"path" jsonschema:"the directory that was listed"`
+	Files []workerproto.FileInfo `json:"files" jsonschema:"entries in the directory, non-recursive"`
 }
 
 func listDirHandler(deps Deps) mcp.ToolHandlerFor[ListDirInput, ListDirOutput] {
@@ -24,19 +24,19 @@ func listDirHandler(deps Deps) mcp.ToolHandlerFor[ListDirInput, ListDirOutput] {
 		if path == "" {
 			path = "."
 		}
-		sb, err := sandboxForActor(ctx, deps)
+		agentID, err := agentForCall(ctx, deps)
 		if err != nil {
 			return nil, ListDirOutput{}, err
 		}
-		files, err := sb.ListDir(path)
+		files, err := deps.Executor.ListDir(ctx, agentID, path)
 		if err != nil {
 			return nil, ListDirOutput{}, fmt.Errorf("list directory: %w", err)
 		}
 		// An empty directory must serialize as [] rather than null: a client
-		// distinguishing "no entries" from "field absent" would otherwise see
-		// the latter.
+		// distinguishing "no entries" from "field absent" would otherwise see the
+		// latter.
 		if files == nil {
-			files = []sandbox.FileInfo{}
+			files = []workerproto.FileInfo{}
 		}
 		return nil, ListDirOutput{Path: path, Files: files}, nil
 	}

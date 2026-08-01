@@ -1,4 +1,4 @@
-package sandbox
+package stream
 
 // DefaultStreamBufferBytes is how much recent output is retained per sandbox for
 // replay to a connecting watcher.

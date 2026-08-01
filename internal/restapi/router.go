@@ -7,15 +7,17 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/JetManiack/go-ai-executor/internal/humanauth"
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/stream"
+	"github.com/JetManiack/go-ai-executor/internal/workerhub"
 )
 
-// Options is what the REST API needs: the database, the sandbox manager whose
-// terminals it streams and whose processes it kills, and the provider that
+// Options is what the REST API needs: the database, the event bus it streams
+// terminals from, the worker hub it stops sandboxes through, and the provider that
 // authenticates the humans doing it.
 type Options struct {
 	DB           *gorm.DB
-	Manager      *sandbox.Manager
+	Bus          *stream.Broadcaster
+	Hub          *workerhub.Hub
 	AuthProvider humanauth.Provider
 }
 

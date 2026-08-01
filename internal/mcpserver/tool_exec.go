@@ -3,11 +3,11 @@ package mcpserver
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/workerproto"
 )
 
 type ExecCommandInput struct {
@@ -32,21 +32,21 @@ type ExecCommandOutput struct {
 
 func execCommandHandler(deps Deps) mcp.ToolHandlerFor[ExecCommandInput, ExecCommandOutput] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in ExecCommandInput) (*mcp.CallToolResult, ExecCommandOutput, error) {
-		sb, err := sandboxForActor(ctx, deps)
+		agentID, err := agentForCall(ctx, deps)
 		if err != nil {
 			return nil, ExecCommandOutput{}, err
 		}
 
-		var timeout time.Duration
-		if in.TimeoutSec > 0 {
-			timeout = time.Duration(in.TimeoutSec) * time.Second
-		}
-
-		// The sandbox publishes started/output/finished events to watchers as the
-		// command runs; nothing is broadcast from here, so a human sees a
-		// long-running command's output while it is still producing it rather
-		// than in one dump at the end.
-		res, execErr := sb.ExecCommand(ctx, in.Command, in.Args, timeout, in.WorkDir)
+		// The worker publishes started/output/finished events as the command runs
+		// and forwards them here, so a human watching sees a long-running
+		// command's output while it is still producing it rather than in one dump
+		// at the end.
+		res, execErr := deps.Executor.Exec(ctx, agentID, workerproto.ExecRequest{
+			Command:    in.Command,
+			Args:       in.Args,
+			TimeoutSec: in.TimeoutSec,
+			WorkDir:    in.WorkDir,
+		})
 		output := ExecCommandOutput{
 			Stdout:     res.Stdout,
 			Stderr:     res.Stderr,

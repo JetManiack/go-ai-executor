@@ -23,14 +23,14 @@ func writeFileHandler(deps Deps) mcp.ToolHandlerFor[WriteFileInput, WriteFileOut
 		if in.Path == "" {
 			return nil, WriteFileOutput{}, errors.New("path cannot be empty")
 		}
-		sb, err := sandboxForActor(ctx, deps)
+		agentID, err := agentForCall(ctx, deps)
 		if err != nil {
 			return nil, WriteFileOutput{}, err
 		}
-		data := []byte(in.Content)
-		if err := sb.WriteFile(in.Path, data, 0o644); err != nil {
+		written, err := deps.Executor.WriteFile(ctx, agentID, in.Path, in.Content)
+		if err != nil {
 			return nil, WriteFileOutput{}, fmt.Errorf("write file: %w", err)
 		}
-		return nil, WriteFileOutput{Path: in.Path, Bytes: len(data)}, nil
+		return nil, WriteFileOutput{Path: in.Path, Bytes: written}, nil
 	}
 }

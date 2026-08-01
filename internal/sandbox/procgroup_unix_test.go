@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/JetManiack/go-ai-executor/internal/stream"
 )
 
 // commandTimeout is deliberately far longer than any deadline these tests wait
@@ -49,7 +51,7 @@ func waitGone(pid int, timeout time.Duration) bool {
 // This is the shape that used to leak: exec.Cmd signals only the direct child —
 // the shell — so the backgrounded sleep was reparented and outlived both the
 // timeout and any attempt to stop the sandbox.
-func backgroundedChildPID(t *testing.T, sb *Sandbox, bus *Broadcaster) (int, <-chan ExecResult) {
+func backgroundedChildPID(t *testing.T, sb *Sandbox, bus *stream.Broadcaster) (int, <-chan ExecResult) {
 	t.Helper()
 
 	_, sub := bus.Subscribe(sb.ID(), 0)
@@ -66,7 +68,7 @@ func backgroundedChildPID(t *testing.T, sb *Sandbox, bus *Broadcaster) (int, <-c
 	for {
 		select {
 		case e := <-sub.Events():
-			if e.Kind != EventStdout {
+			if e.Kind != stream.EventStdout {
 				continue
 			}
 			pid, err := strconv.Atoi(strings.TrimSpace(e.Data))
@@ -116,7 +118,10 @@ func TestKillAllTearsDownBackgroundedChildren(t *testing.T) {
 // path, which is the one that fires without anybody watching.
 func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 	cfg := DefaultConfig(t.TempDir())
-	mgr, err := NewManager(cfg)
+	bus := stream.NewBroadcaster(0)
+	// Broadcaster.Publish returns the stamped event; the sink discards it, because
+	// only the server assigns sequence numbers and only tests care about them.
+	mgr, err := NewManager(cfg, SinkFunc(func(e stream.Event) { bus.Publish(e) }))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -124,7 +129,6 @@ func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	bus := mgr.Broadcaster()
 	_, sub := bus.Subscribe(sb.ID(), 0)
 	defer bus.Unsubscribe(sb.ID(), sub)
 
@@ -142,7 +146,7 @@ func TestTimeoutTearsDownBackgroundedChildren(t *testing.T) {
 	for childPID == 0 {
 		select {
 		case e := <-sub.Events():
-			if e.Kind != EventStdout {
+			if e.Kind != stream.EventStdout {
 				continue
 			}
 			pid, convErr := strconv.Atoi(strings.TrimSpace(e.Data))
@@ -201,7 +205,7 @@ func TestKillAllPublishesKilledEvent(t *testing.T) {
 	for {
 		select {
 		case e := <-sub.Events():
-			if e.Kind != EventKilled {
+			if e.Kind != stream.EventKilled {
 				continue
 			}
 			if e.ByActor != "Grace" || e.Reason != "runaway loop" {
@@ -263,7 +267,7 @@ func TestKillConvergesOnProcessesForkedDuringTheKill(t *testing.T) {
 	for started := false; !started; {
 		select {
 		case e := <-sub.Events():
-			if e.Kind == EventStarted {
+			if e.Kind == stream.EventStarted {
 				started = true
 			}
 		case <-deadline:

@@ -3,18 +3,18 @@
 Ordered roughly by how much each one is missed in practice. Nothing here is
 committed to a date.
 
-## Audit trail
+## Reading the audit trail
 
-The web UI observes and stops; it does not journal. Once a sandbox's output falls
-out of the ring buffer, or the process restarts, there is no record of what an
-agent did — including which files it deleted.
+Every tool call now writes two journal rows — one when it is attempted, one when
+it returns — kept for `--audit-retention` (a week by default) and pruned hourly.
+What is missing is anywhere to read them: there is no API and no UI, so answering
+"who deleted this" means a SQL client.
 
-That was a deliberate choice: a live terminal is an operations tool, and adding a
-history table to it doubles the write path for every tool call. But "who deleted
-this" is a question that will eventually be asked, and answering it needs a
-persisted `ToolCall`-style table with its own retention policy, as in
-`go-ai-webtools`. Worth doing properly rather than by accident, which is why the
-tables are not there now.
+An admin-only endpoint over `storage.ListAudit`, and a view beside the terminal,
+are the obvious next step. Two things to decide when building it: whether human
+actions (blocking a sandbox, issuing a token) join the same table — they are
+recorded nowhere today — and whether a row should link to the terminal output it
+produced, which needs the exec id the tool currently keeps to itself.
 
 ## Terminal fidelity
 
@@ -30,6 +30,41 @@ tables are not there now.
 - **Search and download.** Grepping a long run, and saving it, both currently
   mean selecting text in the browser.
 
+## The worker link
+
+- **Per-worker revocable tokens.** One shared `--worker-token` authenticates the
+  whole pool, so removing a compromised worker's access means rotating the secret
+  and restarting every other worker with it. Tokens issued per worker, revocable
+  individually, are the obvious next step; mTLS is the one after that.
+- **Draining a worker before it goes.** SIGTERM cancels commands in flight and the
+  agents pinned there get an empty sandbox elsewhere. A worker that stopped
+  accepting new agents, finished what it was running, and only then exited would
+  turn a routine scale-down from something an agent notices into something it
+  doesn't. The HPA's fifteen-minute scale-down window is the blunt version.
+- **Results in flight do not survive a reconnect.** A worker that redials
+  reclaims the agents it holds, so a server restart no longer costs an agent its
+  files — but a command that was running when the connection dropped keeps
+  running with nowhere to report, and its caller has already been told the worker
+  disconnected. Re-delivering those results means request ids that outlive a
+  connection, which is a larger change than the reclaim was.
+
+## Confinement inside an agent's own sandbox
+
+Per-agent user ids separate agents from each other and from the worker's
+credentials. What they do not do is confine an agent within its own sandbox: a
+command still reaches anything its uid can, which is its own directory plus
+whatever is world-readable in the image.
+
+Landlock is the answer and it is now available unprivileged — kernel 6.8 with ABI
+4, permitted by containerd 2.2's default seccomp profile, so no node-local profile
+and no Pod Security relaxation. The shape is a ruleset applied in the child between
+fork and exec, scoping it to the agent's directory; it is inherited across execve
+and cannot be dropped. `internal/sandboxop` is where it goes, since every
+sandbox-touching operation already passes through there.
+
+Not available on the same node: `CLONE_NEWUSER` is still blocked by the seccomp
+profile, so bubblewrap-style nesting is out.
+
 ## Resource limits
 
 The sandbox bounds paths, environment, output size and wall-clock time. It does
@@ -38,8 +73,11 @@ sandbox directory or fork until the host suffers, and only the stop button
 answers that. Per-sandbox cgroup limits (Linux) or a per-agent disk quota would
 turn "an operator noticed" into "the kernel refused".
 
-Network egress is likewise unrestricted — a command reaches whatever the server
-can reach.
+A worker deployment does most of this at the pod boundary instead — memory limits,
+a bounded `emptyDir`, and egress that reaches the internet but not the cluster —
+which bounds the blast radius of a whole worker rather than of one agent. Several
+agents share a worker, so a per-sandbox limit is still the thing that stops one of
+them from starving the others.
 
 ## Sandbox lifecycle
 
@@ -55,10 +93,17 @@ can reach.
 ## Multi-replica behaviour
 
 Blocks are read from the database per tool call, so they work across replicas.
-The terminal stream does not: a watcher connected to replica A sees only the
-commands that ran on replica A, and the ring buffer is per process. Making the
-stream cluster-wide needs a shared bus (Redis, NATS) or sticky routing by agent
-ID. Single-replica deployments are unaffected.
+The terminal stream does not, and the worker split sharpened the problem rather
+than solving it: a worker holds its connection to one replica, so that replica is
+the only one that sees its events and the only one that can dispatch to it. A
+watcher on replica B watches nothing, and an agent whose MCP call lands on B is
+told no worker is connected — even though one is, to A.
+
+Making the server horizontally scalable therefore needs both halves: a shared bus
+(Redis, NATS) for the events, and cross-replica dispatch — either a worker
+registry every replica can route through, or sticky routing by agent ID at the
+ingress. Until then the server runs as a single replica deliberately, and the
+worker pool is what scales.
 
 ## The local helper
 
@@ -70,12 +115,18 @@ ID. Single-replica deployments are unaffected.
   little over the cap comes back truncated for no good reason; a separate, larger
   `--max-read-bytes` would fit both uses better.
 
-## The server's `read_file` is unbounded
+## `read_file` refuses large files rather than truncating them
 
-The server's `read_file` returns a file whole, however large — an agent asking for
-a multi-gigabyte file balloons the process and the MCP response. The local helper
-caps reads and reports `truncated`; the server should do the same, which means a
-new flag and a new output field on a tool clients already use.
+`--max-file-bytes` bounds one transfer, and a file over it is refused by name —
+checked by stat before the read, so the worker does not load what it cannot
+return. That is a real limit rather than the wire's accident, but it is still the
+blunter of the two behaviours: the local helper cuts a long read and reports
+`truncated`, which is what an agent skimming a large log actually wants.
+
+Giving the server the same needs a `truncated` field on a tool clients already
+use. Chunking transfers over the link would remove the ceiling rather than move
+it, and is the more complete answer — at which point `--max-file-bytes` stops
+sizing the socket and becomes a policy limit on its own.
 
 ## Operational polish
 

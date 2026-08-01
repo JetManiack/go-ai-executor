@@ -25,7 +25,6 @@ func TestDefaultAuthRequiresOIDC(t *testing.T) {
 	err := runRoot(t,
 		"--listen-addr=127.0.0.1:0",
 		"--db-dsn="+filepath.Join(t.TempDir(), "test.db"),
-		"--sandbox-dir="+t.TempDir(),
 	)
 	if err == nil {
 		t.Fatal("server started with no auth configured and no --auth-stub")
@@ -62,7 +61,6 @@ func TestIncompleteOIDCConfigIsRefused(t *testing.T) {
 			args := append([]string{
 				"--listen-addr=127.0.0.1:0",
 				"--db-dsn=" + filepath.Join(t.TempDir(), "test.db"),
-				"--sandbox-dir=" + t.TempDir(),
 			}, tt.args...)
 
 			err := runRoot(t, args...)
@@ -93,7 +91,6 @@ func TestSessionKeyMustBe32Bytes(t *testing.T) {
 			err := runRoot(t,
 				"--listen-addr=127.0.0.1:0",
 				"--db-dsn="+filepath.Join(t.TempDir(), "test.db"),
-				"--sandbox-dir="+t.TempDir(),
 				"--oidc-issuer=https://keycloak.example.com/realms/executor",
 				"--oidc-client-id=executor",
 				"--oidc-client-secret=shhh",

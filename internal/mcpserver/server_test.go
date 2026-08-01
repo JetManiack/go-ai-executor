@@ -173,24 +173,29 @@ func TestSandboxesAreIsolatedPerAgent(t *testing.T) {
 // working directory.
 func TestExecCommandRunsInTheAgentSandbox(t *testing.T) {
 	db := openTestDB(t)
-	agent, token := mustAgentWithToken(t, db, "agent-1")
-	deps := testDeps(t, db)
-	session := connectSession(t, newTestServer(t, deps), token)
+	_, token := mustAgentWithToken(t, db, "agent-1")
+	session := connectSession(t, newTestServer(t, testDeps(t, db)), token)
 
-	sb, err := deps.Manager.GetSandbox(agent.ID)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
-
-	// One program, one argument vector: there is no shell to interpret a
-	// compound command, so the working directory and the arguments are checked
-	// with separate calls.
+	// One program, one argument vector: there is no shell to interpret a compound
+	// command, so the working directory and the arguments are checked with
+	// separate calls.
 	pwd := callTool(t, session, "exec_command", map[string]any{"command": "pwd"})
 	if pwd.IsError {
 		t.Fatalf("exec_command(pwd) failed: %s", contentText(pwd.Content))
 	}
-	if out := outputField(t, pwd, "stdout"); !strings.Contains(out, sb.GetStatus().RootDir) {
-		t.Errorf("output %q does not show the sandbox root as the working directory (want %q)", out, sb.GetStatus().RootDir)
+
+	status := callTool(t, session, "get_sandbox_status", map[string]any{})
+	if status.IsError {
+		t.Fatalf("get_sandbox_status failed: %s", contentText(status.Content))
+	}
+	fields, _ := status.StructuredContent.(map[string]any)
+	reported, _ := fields["status"].(map[string]any)
+	root, _ := reported["root_dir"].(string)
+	if root == "" {
+		t.Fatalf("status did not report a sandbox root: %v", fields)
+	}
+	if out := outputField(t, pwd, "stdout"); !strings.Contains(out, root) {
+		t.Errorf("output %q does not show the sandbox root as the working directory (want %q)", out, root)
 	}
 
 	echo := callTool(t, session, "exec_command", map[string]any{

@@ -149,7 +149,7 @@ func TestDeniedNamesAreDroppedEvenIfConfigured(t *testing.T) {
 	env := buildEnv(Config{
 		RootDir:        root,
 		EnvPassthrough: []string{"DB_DSN", "HOME"},
-	}, root)
+	}, root, "")
 
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "DB_DSN=") {
@@ -186,7 +186,7 @@ func TestExtraEnvCannotOverrideTheJailedHome(t *testing.T) {
 	env := buildEnv(Config{
 		RootDir:  root,
 		ExtraEnv: []string{"HOME=/etc", "PWD=/etc"},
-	}, root)
+	}, root, "")
 
 	// buildEnv appends the sandbox's values last, and the last assignment wins,
 	// so a misconfigured ExtraEnv cannot aim a command out of the jail.
@@ -211,7 +211,7 @@ func TestFallbackPATHWhenTheServerHasNone(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	env := buildEnv(Config{RootDir: root, EnvPassthrough: []string{"PATH"}}, root)
+	env := buildEnv(Config{RootDir: root, EnvPassthrough: []string{"PATH"}}, root, "")
 
 	var path string
 	for _, entry := range env {
@@ -232,7 +232,7 @@ func TestUnsetPassthroughVariablesAreOmitted(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	env := buildEnv(Config{RootDir: root, EnvPassthrough: []string{"LC_ALL"}}, root)
+	env := buildEnv(Config{RootDir: root, EnvPassthrough: []string{"LC_ALL"}}, root, "")
 
 	for _, entry := range env {
 		// An empty LC_ALL is not the same as an absent one: some tools treat the

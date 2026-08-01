@@ -11,7 +11,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"github.com/JetManiack/go-ai-executor/internal/sandbox"
+	"github.com/JetManiack/go-ai-executor/internal/stream"
+	"github.com/JetManiack/go-ai-executor/internal/workerproto"
 )
 
 // dial opens the terminal stream for actorID, optionally resuming after a
@@ -36,12 +37,12 @@ func (api *testAPI) dial(t *testing.T, actorID string, after uint64) *websocket.
 }
 
 // readEvent reads one event, failing the test if none arrives in time.
-func readEvent(t *testing.T, conn *websocket.Conn, timeout time.Duration) sandbox.Event {
+func readEvent(t *testing.T, conn *websocket.Conn, timeout time.Duration) stream.Event {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var event sandbox.Event
+	var event stream.Event
 	if err := wsjson.Read(ctx, conn, &event); err != nil {
 		t.Fatalf("read event: %v", err)
 	}
@@ -54,18 +55,16 @@ func TestStreamDeliversLiveOutput(t *testing.T) {
 
 	conn := api.dial(t, agent.ID, 0)
 
-	sb, err := api.manager.GetSandbox(agent.ID)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
 	go func() {
-		_, _ = sb.ExecCommand(context.Background(), "echo", []string{"streamed"}, 10*time.Second, "")
+		_, _ = api.worker.Hub.Exec(context.Background(), agent.ID, workerproto.ExecRequest{
+			Command: "echo", Args: []string{"streamed"},
+		})
 	}()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		event := readEvent(t, conn, 10*time.Second)
-		if event.Kind == sandbox.EventStdout && strings.Contains(event.Data, "streamed") {
+		if event.Kind == stream.EventStdout && strings.Contains(event.Data, "streamed") {
 			return
 		}
 	}
@@ -76,15 +75,13 @@ func TestStreamReplaysRetainedOutput(t *testing.T) {
 	api := newTestAPI(t, viewerProvider())
 	agent := api.mustAgent(t, "agent-1")
 
-	sb, err := api.manager.GetSandbox(agent.ID)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
 	// Output produced before anybody was watching: an operator opening the
 	// terminal after an alert must see what already happened, or there is nothing
 	// to base a kill-or-not decision on.
-	if _, err := sb.ExecCommand(context.Background(), "echo", []string{"earlier"}, 10*time.Second, ""); err != nil {
-		t.Fatalf("ExecCommand: %v", err)
+	if _, err := api.worker.Hub.Exec(context.Background(), agent.ID, workerproto.ExecRequest{
+		Command: "echo", Args: []string{"earlier"},
+	}); err != nil {
+		t.Fatalf("Exec: %v", err)
 	}
 
 	conn := api.dial(t, agent.ID, 0)
@@ -105,21 +102,19 @@ func TestStreamReportsAGapAfterEviction(t *testing.T) {
 	api := newTestAPI(t, viewerProvider())
 	agent := api.mustAgent(t, "agent-1")
 
-	sb, err := api.manager.GetSandbox(agent.ID)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
-	// Far more output than the retention budget, so sequence number 1 is long
-	// gone by the time the watcher asks to resume from it.
-	if _, err := sb.ExecCommand(context.Background(), "/bin/sh", []string{"-c", "for i in $(seq 1 40000); do echo line-$i; done"}, 60*time.Second, ""); err != nil {
-		t.Fatalf("ExecCommand: %v", err)
+	// Far more output than the retention budget, so sequence number 1 is long gone
+	// by the time the watcher asks to resume from it.
+	if _, err := api.worker.Hub.Exec(context.Background(), agent.ID, workerproto.ExecRequest{
+		Command: "/bin/sh", Args: []string{"-c", "for i in $(seq 1 40000); do echo line-$i; done"}, TimeoutSec: 60,
+	}); err != nil {
+		t.Fatalf("Exec: %v", err)
 	}
 
 	conn := api.dial(t, agent.ID, 1)
 	event := readEvent(t, conn, 5*time.Second)
 
-	if event.Kind != sandbox.EventGap {
-		t.Fatalf("first event kind = %q, want %q", event.Kind, sandbox.EventGap)
+	if event.Kind != stream.EventGap {
+		t.Fatalf("first event kind = %q, want %q", event.Kind, stream.EventGap)
 	}
 	if event.MissedEvents == 0 {
 		t.Error("gap marker reports zero missed events")
@@ -160,15 +155,7 @@ func TestStreamIgnoresClientMessages(t *testing.T) {
 	// closed under us; either is acceptable, executing it is not.
 	_ = wsjson.Write(ctx, conn, map[string]string{"command": "touch /tmp/should-not-exist"})
 
-	sb, err := api.manager.GetSandbox(agent.ID)
-	if err != nil {
-		t.Fatalf("GetSandbox: %v", err)
-	}
-	if got := sb.RunningCommands(); got != 0 {
-		t.Errorf("running commands = %d, want 0 after a client message", got)
-	}
-
-	listing, err := sb.ListDir(".")
+	listing, err := api.worker.Hub.ListDir(context.Background(), agent.ID, ".")
 	if err != nil {
 		t.Fatalf("ListDir: %v", err)
 	}
@@ -190,8 +177,8 @@ func TestStreamBlockedEventReachesWatchers(t *testing.T) {
 	// Without this event a watcher sees output stop and cannot tell a finished
 	// command from an administrative stop.
 	event := readEvent(t, conn, 5*time.Second)
-	if event.Kind != sandbox.EventBlocked {
-		t.Fatalf("event kind = %q, want %q", event.Kind, sandbox.EventBlocked)
+	if event.Kind != stream.EventBlocked {
+		t.Fatalf("event kind = %q, want %q", event.Kind, stream.EventBlocked)
 	}
 	if event.ByActor != "Grace" || event.Reason != "runaway loop" {
 		t.Errorf("event = %+v, want it to name who blocked it and why", event)

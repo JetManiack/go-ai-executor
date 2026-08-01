@@ -1,10 +1,12 @@
 SHELL := /bin/bash
 
-BINARY_NAME       := executor
-LOCAL_BINARY_NAME := executor-local
-BIN_DIR           := bin
-CMD_DIR           := ./cmd/executor
-LOCAL_CMD_DIR     := ./cmd/executor-local
+BINARY_NAME        := executor
+LOCAL_BINARY_NAME  := executor-local
+WORKER_BINARY_NAME := worker
+BIN_DIR            := bin
+CMD_DIR            := ./cmd/executor
+LOCAL_CMD_DIR      := ./cmd/executor-local
+WORKER_CMD_DIR     := ./cmd/worker
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
@@ -21,12 +23,19 @@ help: ## Show this help message
 	awk 'BEGIN {FS = ":.*?## "}; /^[a-zA-Z0-9_\-]+:.*?## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
 
 .PHONY: build
-build: build-server build-local ## Build both binaries into bin/
+build: build-server build-worker build-local ## Build all three binaries into bin/
 
 .PHONY: build-server
 build-server: generate ## Build the multi-user HTTP server into bin/executor (regenerates the frontend bundle first)
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/$(BINARY_NAME) $(CMD_DIR)
+
+# No `generate` dependency either: the worker serves no HTTP at all. It holds the
+# sandboxes and runs the commands; everything human-facing stays on the server.
+.PHONY: build-worker
+build-worker: ## Build the execution worker into bin/worker (no frontend, no database)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/$(WORKER_BINARY_NAME) $(WORKER_CMD_DIR)
 
 # No `generate` dependency: the local helper has no web UI, so nothing to bundle.
 .PHONY: build-local
@@ -34,9 +43,22 @@ build-local: ## Build the local stdio helper into bin/executor-local (no fronten
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN_DIR)/$(LOCAL_BINARY_NAME) $(LOCAL_CMD_DIR)
 
+# DEV_WORKER_TOKEN is shared by `run` and `run-worker` so the two halves find each
+# other in a fresh checkout. It is a fixed string on purpose: these targets already
+# run with stub auth and are development-only. A deployment gets a real secret.
+DEV_WORKER_TOKEN := dev-worker-token
+
 .PHONY: run
-run: generate ## Run the server locally with stub auth (DB_DSN=data/executor.db, use ARGS="--flag=value" for extra flags)
-	AUTH_STUB=true DB_DSN="data/executor.db" go run $(CMD_DIR) $(ARGS)
+run: generate ## Run the server locally with stub auth (DB_DSN=data/executor.db, use ARGS="--flag=value" for extra flags); needs `make run-worker` alongside it to execute anything
+	AUTH_STUB=true DB_DSN="data/executor.db" WORKER_TOKEN="$(DEV_WORKER_TOKEN)" go run $(CMD_DIR) $(ARGS)
+
+# Nothing runs without this: the server holds no sandbox of its own, so a tool
+# call with no worker connected reports exactly that.
+.PHONY: run-worker
+run-worker: ## Run a worker against the local server, sandboxes under data/sandboxes (run this in a second terminal next to `make run`)
+	@mkdir -p data/sandboxes
+	SERVER_URL="http://localhost:8080" WORKER_TOKEN="$(DEV_WORKER_TOKEN)" WORKER_ID="worker-dev" \
+	SANDBOX_DIR="data/sandboxes" go run $(WORKER_CMD_DIR) $(ARGS)
 
 .PHONY: run-local
 run-local: ## Run the local stdio helper in this directory (it reads MCP frames on stdin, so a bare terminal will look idle)

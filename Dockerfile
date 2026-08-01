@@ -26,19 +26,88 @@ ARG VERSION=docker
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/executor ./cmd/executor
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/worker ./cmd/worker
 
-FROM alpine:3.22
-# ca-certificates is not optional here: OIDC discovery and the token endpoint
-# are https calls to Keycloak, and without the trust store the server refuses to
-# start with an opaque x509 error. Agents also routinely fetch over https from
-# inside their sandboxes.
-RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S executor && adduser -S executor -G executor
+# Debian rather than Alpine, and the reason is Python.
+#
+# PyPI's binary wheels target manylinux, which means glibc. On musl, pip falls
+# back to building from source for a large part of the ecosystem — numpy, pandas,
+# cryptography, anything with a C extension — which needs a toolchain in the image
+# and turns `pip install` from seconds into minutes, or into a compiler error an
+# agent cannot do anything about. musllinux wheels exist and cover far less.
+#
+# The cost is a larger base (tens of megabytes against Alpine's five). Paid
+# deliberately: an image where Python is nominally present and practically unusable
+# is worse than a bigger one where it works.
+FROM debian:bookworm-slim
+
+# The tools an agent is likely to reach for, plus the ones the service needs.
+#
+# ca-certificates is not optional: OIDC discovery and the token endpoint are https
+# calls to Keycloak, and without the trust store the server refuses to start with
+# an opaque x509 error. Agents also fetch over https constantly.
+#
+# Deliberately absent: a compiler toolchain. build-essential is most of a
+# quarter-gigabyte, and with glibc wheels the common cases do not need it. Add it
+# here if your agents' tasks turn out to.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+        ca-certificates tzdata \
+        python3 python3-venv python3-pip \
+        git openssh-client curl \
+        jq ripgrep less unzip xz-utils procps; \
+    rm -rf /var/lib/apt/lists/*
+
+# The UID is pinned rather than left to useradd: a Pod with runAsNonRoot set
+# refuses to start on a non-numeric USER, because the kubelet cannot verify a name
+# is not root. 65532 is the conventional "nonroot" id.
+RUN set -eux; \
+    groupadd -g 65532 executor; \
+    useradd -u 65532 -g 65532 -m -d /home/executor -s /usr/sbin/nologin executor
+
+# Passwd and group entries for the per-agent id range the worker hands out.
+#
+# Without them getpwuid() finds nothing, and git, ssh and npm all complain about
+# an unknown user in ways that read as a sandbox bug rather than a missing line in
+# a file. They have to be generated at build time because the worker's root
+# filesystem is read-only at runtime, and the range is fixed in the image for the
+# same reason — an operator choosing a different one needs a different image,
+# which is the honest coupling rather than a hidden one.
+#
+# 20000–20999: below 65536, because a pod in a user namespace maps exactly that
+# many ids and an id above it could not be mapped.
+ARG AGENT_UID_FIRST=20000
+ARG AGENT_UID_COUNT=1000
+RUN set -eu; \
+    end=$((AGENT_UID_FIRST + AGENT_UID_COUNT - 1)); \
+    for uid in $(seq "$AGENT_UID_FIRST" "$end"); do \
+      echo "agent$uid:x:$uid:$uid::/nonexistent:/usr/sbin/nologin" >> /etc/passwd; \
+      echo "agent$uid:x:$uid:" >> /etc/group; \
+    done
 WORKDIR /app
-COPY --from=builder --chown=executor:executor /out/executor .
-# Writable directories for the default sqlite DSN (data/executor.db) and the
-# default sandbox root (./scratch), which each agent gets a subdirectory of.
-RUN mkdir -p /app/data /app/scratch && chown -R executor:executor /app
-USER executor
+COPY --from=builder --chown=executor:executor /out/executor ./
+COPY --from=builder --chown=executor:executor /out/worker ./
+COPY --chown=executor:executor --chmod=0755 ./docker-entrypoint.sh ./
+# One image, two commands: /app/data holds the server's default sqlite DSN
+# (data/executor.db), and /sandboxes is the worker's default root, which each
+# agent gets a subdirectory of. Both are mount points in a real deployment — the
+# worker's is an emptyDir, which is what makes its root filesystem read-only.
+RUN mkdir -p /app/data && chown -R executor:executor /app
+# /sandboxes stays root-owned, unlike /app.
+#
+# With per-agent ids the worker is container-root without CAP_DAC_OVERRIDE, so it
+# is bound by file permissions like anyone else — and a root-owned parent is the
+# one it can create agent directories in. What protects an agent's files is the
+# 0700 on its own directory, not the mode of the directory above it.
+#
+# A worker running as 65532 instead (per-agent ids off) needs the mount itself made
+# writable for that user: `fsGroup` in a Pod, a tmpfs mode in Compose. Both already
+# do, and both override whatever the image says about this path anyway.
+RUN mkdir -p /sandboxes && chmod 0755 /sandboxes
+USER 65532:65532
 EXPOSE 8080
-ENTRYPOINT ["./executor"]
+ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["executor"]

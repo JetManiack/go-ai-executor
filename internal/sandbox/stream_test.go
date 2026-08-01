@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JetManiack/go-ai-executor/internal/stream"
 )
 
 // shellProgram and shellScript spell out a shell invocation for the tests whose
@@ -20,11 +22,14 @@ func shellScript(script string) []string { return []string{"-c", script} }
 
 // newStreamingSandbox builds a manager-backed sandbox, which is the only kind
 // with an event bus attached.
-func newStreamingSandbox(t *testing.T) (*Sandbox, *Broadcaster) {
+func newStreamingSandbox(t *testing.T) (*Sandbox, *stream.Broadcaster) {
 	t.Helper()
 	cfg := DefaultConfig(t.TempDir())
 	cfg.DefaultTimeout = 10 * time.Second
-	mgr, err := NewManager(cfg)
+	bus := stream.NewBroadcaster(0)
+	// Broadcaster.Publish returns the stamped event; the sink discards it, because
+	// only the server assigns sequence numbers and only tests care about them.
+	mgr, err := NewManager(cfg, SinkFunc(func(e stream.Event) { bus.Publish(e) }))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -32,7 +37,7 @@ func newStreamingSandbox(t *testing.T) (*Sandbox, *Broadcaster) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	return sb, mgr.Broadcaster()
+	return sb, bus
 }
 
 // collectAsync starts draining sub immediately and returns a channel carrying
@@ -42,13 +47,13 @@ func newStreamingSandbox(t *testing.T) (*Sandbox, *Broadcaster) {
 // reading after the command exits falls behind the queue and is disconnected as a
 // slow consumer, which is the broadcaster working as intended, not something for
 // a test to work around.
-func collectAsync(sub *Subscription) <-chan []Event {
-	out := make(chan []Event, 1)
+func collectAsync(sub *stream.Subscription) <-chan []stream.Event {
+	out := make(chan []stream.Event, 1)
 	go func() {
-		var events []Event
+		var events []stream.Event
 		for e := range sub.Events() {
 			events = append(events, e)
-			if e.Kind == EventFinished {
+			if e.Kind == stream.EventFinished {
 				break
 			}
 		}
@@ -58,7 +63,7 @@ func collectAsync(sub *Subscription) <-chan []Event {
 }
 
 // awaitEvents waits for a collector started by collectAsync.
-func awaitEvents(t *testing.T, collected <-chan []Event, timeout time.Duration) []Event {
+func awaitEvents(t *testing.T, collected <-chan []stream.Event, timeout time.Duration) []stream.Event {
 	t.Helper()
 	select {
 	case events := <-collected:
@@ -87,7 +92,7 @@ func TestOutputIsStreamedWhileTheCommandRuns(t *testing.T) {
 	for {
 		select {
 		case e := <-sub.Events():
-			if e.Kind == EventStdout && strings.Contains(e.Data, "early") {
+			if e.Kind == stream.EventStdout && strings.Contains(e.Data, "early") {
 				return // output arrived before the command exited
 			}
 		case <-done:
@@ -114,8 +119,8 @@ func TestExecPublishesStartedOutputAndFinished(t *testing.T) {
 		t.Fatalf("collected %d events, want at least started, output and finished", len(events))
 	}
 
-	if events[0].Kind != EventStarted {
-		t.Errorf("first event kind = %q, want %q", events[0].Kind, EventStarted)
+	if events[0].Kind != stream.EventStarted {
+		t.Errorf("first event kind = %q, want %q", events[0].Kind, stream.EventStarted)
 	}
 	// The started event carries the rendered argument vector, quoted where an
 	// argument contains whitespace — with no shell, a watcher has to be able to
@@ -126,8 +131,8 @@ func TestExecPublishesStartedOutputAndFinished(t *testing.T) {
 	}
 
 	last := events[len(events)-1]
-	if last.Kind != EventFinished {
-		t.Errorf("last event kind = %q, want %q", last.Kind, EventFinished)
+	if last.Kind != stream.EventFinished {
+		t.Errorf("last event kind = %q, want %q", last.Kind, stream.EventFinished)
 	}
 	if last.ExitCode != 0 {
 		t.Errorf("finished exit code = %d, want 0", last.ExitCode)
@@ -144,9 +149,9 @@ func TestExecPublishesStartedOutputAndFinished(t *testing.T) {
 	var stdout, stderr strings.Builder
 	for _, e := range events {
 		switch e.Kind {
-		case EventStdout:
+		case stream.EventStdout:
 			stdout.WriteString(e.Data)
-		case EventStderr:
+		case stream.EventStderr:
 			stderr.WriteString(e.Data)
 		}
 	}
@@ -173,7 +178,7 @@ func TestStreamedChunksReassembleToTheReturnedOutput(t *testing.T) {
 	events := awaitEvents(t, collected, 30*time.Second)
 	var streamed strings.Builder
 	for _, e := range events {
-		if e.Kind == EventStdout {
+		if e.Kind == stream.EventStdout {
 			streamed.WriteString(e.Data)
 		}
 	}
@@ -205,7 +210,7 @@ func TestMultiByteOutputSurvivesChunkBoundaries(t *testing.T) {
 	events := awaitEvents(t, collected, 60*time.Second)
 	var streamed strings.Builder
 	for _, e := range events {
-		if e.Kind == EventStdout {
+		if e.Kind == stream.EventStdout {
 			if strings.Contains(e.Data, "�") {
 				t.Fatalf("chunk contains a replacement character, so a rune was split across events")
 			}
@@ -249,7 +254,10 @@ func TestExitCodeIsReportedNotTreatedAsFailure(t *testing.T) {
 func TestTruncationBoundsTheReturnedOutputOnly(t *testing.T) {
 	cfg := DefaultConfig(t.TempDir())
 	cfg.MaxOutputBytes = 1024
-	mgr, err := NewManager(cfg)
+	bus := stream.NewBroadcaster(0)
+	// Broadcaster.Publish returns the stamped event; the sink discards it, because
+	// only the server assigns sequence numbers and only tests care about them.
+	mgr, err := NewManager(cfg, SinkFunc(func(e stream.Event) { bus.Publish(e) }))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -257,8 +265,8 @@ func TestTruncationBoundsTheReturnedOutputOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	_, sub := mgr.Broadcaster().Subscribe(sb.ID(), 0)
-	defer mgr.Broadcaster().Unsubscribe(sb.ID(), sub)
+	_, sub := bus.Subscribe(sb.ID(), 0)
+	defer bus.Unsubscribe(sb.ID(), sub)
 
 	collected := collectAsync(sub)
 	res, err := sb.ExecCommand(context.Background(), shellProgram, shellScript("for i in $(seq 1 2000); do echo line-$i; done"), 30*time.Second, "")
@@ -278,7 +286,7 @@ func TestTruncationBoundsTheReturnedOutputOnly(t *testing.T) {
 	events := awaitEvents(t, collected, 30*time.Second)
 	var streamed int
 	for _, e := range events {
-		if e.Kind == EventStdout {
+		if e.Kind == stream.EventStdout {
 			streamed += len(e.Data)
 		}
 	}
